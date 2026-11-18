@@ -275,7 +275,10 @@ dist/               交付物输出目录（不入库）
 tests/              编码/捕获/QoS/CPU 的实测与回归测试
 ```
 
-`libs/` 与仓库根 `src/`（上游 RustDesk）**不做任何修改**，所有改动都在 `sos-client/` 内。
+`libs/` 与仓库根 `src/`（上游 RustDesk）原则上不改，全部功能改动都在 `sos-client/` 内。
+现有 4 处不可避免的偏离（可解析性所需的 `Cargo.toml`/`Cargo.lock`、`.gitignore`、
+4 个模块的 `pub mod` 可见性、`vpxcodec.rs` 的基准参数）逐条列在
+[`AGENTS.md`](AGENTS.md) §1，**只减不增**。
 
 改代码前请读 [`AGENTS.md`](AGENTS.md)：那里记录了上游依赖的现状（`hbb_common`/`base`
 拆分、`Stream: Drop`）、采集与码率控制的实测结论、以及一批「不要凭直觉改回去」的坑。

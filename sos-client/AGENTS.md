@@ -14,7 +14,7 @@
 | 约束 | 说明 |
 | --- | --- |
 | **默认不改上游** | 新改动一律落在 `sos-client/`。需要上游行为改变时优先在 SOS 侧包一层或绕开（`sos_dxgi`/`sos_vpx`/`sos_cpu` 都是这么来的）。 |
-| **已存在的上游补丁，只减不增** | 分叉早期留下 4 处，见下表。不要新增第 5 处；能让某处退场时优先退场。 |
+| **已存在的上游补丁，只减不增** | 现存 4 处，见下表。不要新增第 5 处；能让某处退场时优先退场。 |
 | **不钉第三方工具版本** | UPX 等外部工具禁止在源码里写死版本号或 sha256（见 §4）。 |
 | **生产代码禁 `unwrap()`/`expect()`** | 与根 `AGENTS.md` 一致；锁定中毒等例外同样适用。 |
 | **不跑 codegen** | 不要运行 `flutter_rust_bridge_codegen`；SOS 也不用 protobuf codegen（协议类型全部来自 `base` crate）。 |
@@ -27,7 +27,12 @@
 | `Cargo.toml` / `Cargo.lock` | `exclude` 加 `sos-client`；`tray-icon` 补 `rev` | 可解析性必需（见 §3） |
 | `src/lib.rs`、`src/server.rs` | 把 `server` / `clipboard` / `clipboard_service` / `service` 改成 `pub mod` | `sos-client` 直接调 `librustdesk::server::clipboard_service`、`librustdesk::clipboard`、`librustdesk::service` |
 | `libs/scrap/src/common/vpxcodec.rs` | `rc_dropframe_thresh = 0`、`rc_buf_sz = target*5` | **只被 `tests/enc_bench.rs` 用到**：它拿上游编码器做基线对比，必须关掉丢帧、放大缓冲，否则基线被丢帧水位污染（见 §7「编码器 A/B 必须控制丢帧水位」）。生产链路走自建 `sos_vpx`，不经过这里。 |
-| `src/server/video_service.rs` | 新增 `CUSTOM_CAPTURER_FACTORY` 注入点 | **目前无调用方**（SOS 已全面改用 `sos_video` 自建链路）。属于可退场的候选，退场时连同 §2 的说明一起删。 |
+
+已退场的补丁（留一行记录，防止有人照着旧资料又加回来）：
+
+| 文件 | 曾经的改动 | 退场原因 |
+| --- | --- | --- |
+| `src/server/video_service.rs` | `CUSTOM_CAPTURER_FACTORY` 静态注入点 + 3 个 `pub fn`（37 行纯新增） | SOS 全面改用 `sos_video` 自建链路后已无调用方，2026-11-18 整文件还原到上游版本。**不要重新引入**：要影响采集器请在 `sos_video` 侧自己建，不要再往 `libs/scrap` / `video_service` 里塞钩子。 |
 
 ---
 
@@ -105,9 +110,18 @@ sos-client/
 2. **上游把某些 git 依赖的 `rev` 只写在根 `Cargo.lock` 里，不写在清单里。**
    `sos-client` 有独立锁文件，遇到这种依赖只能显式钉 `rev` 或用
    `cargo update -p <crate> --precise <rev>` 对齐到根锁记录的那个提交。
-3. **测试必须带 `--manifest-path`。**
+3. **测试必须带绝对 `--manifest-path`，且不要先 `cd`。**
    `cargo test --manifest-path d:\code\rustdesk\sos-client\Cargo.toml`。
-   单纯 `cd` 会被工具/脚本重写回 workspace 根，测到上游去。
+   `Set-Location`/`cd` 会被某些工具链**静默剥掉**，于是 `--manifest-path Cargo.toml`
+   解析成仓库根的清单 —— 跑的是上游 `rustdesk` 的 225 个单测，而不是 SOS 的 35 个
+   测试二进制。判据：输出里的 `Running` 行应是 `target\debug\deps\` 下带
+   `rustdesk_sos` / `vpx_*` / `qos_*` 等名字，且 target 目录是 `sos-client\target`。
+
+   > 顺带记一笔：直接跑仓库根的 `cargo test` 本来就有 2 个**上游既有失败**，与 SOS
+   > 无关 —— `platform::windows::installer_handoff::directory::tests::
+   > protected_directory_enforces_creator_permissions`（删不掉受保护目录，os error 5）
+   > 和 `src/server/terminal_helper.rs` 的 doctest（缺 `use` 前缀编译不过）。
+   > 看到它们不要当成自己的回归。
 
 ### 依赖名
 
@@ -217,6 +231,10 @@ sos-client/
 不使用上游 `video_service`，链路是：`sos_video` 的采集线程 →
 `Frame::to(yuvfmt)` → `sos_vpx::SosVpxEncoder` → `Conn::send`。
 
+- 只**读取**上游的少量公开 API（`make_display_changed_msg`、`VideoSource`、
+  `restore_resolutions` 等），**不改**它的实现。早期曾在
+  `src/server/video_service.rs` 里塞过 `CUSTOM_CAPTURER_FACTORY` 注入点，已随
+  自建链路成熟而退场（见 §1 的退场记录）——**该文件现在与上游完全一致**。
 - `#[cfg(not(sos_vpx))]` 的「回退上游 video_service」分支**编译不过**（`sos_connection`
   无条件引用 `sos_video`/`sos_vpx`），已换成 `compile_error!`。缺 libvpx 时构建
   直接给出明确原因，不要复活那条分支。
