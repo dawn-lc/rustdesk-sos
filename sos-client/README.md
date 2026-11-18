@@ -276,3 +276,7 @@ tests/              编码/捕获/QoS/CPU 的实测与回归测试
 ```
 
 `libs/` 与仓库根 `src/`（上游 RustDesk）**不做任何修改**，所有改动都在 `sos-client/` 内。
+
+改代码前请读 [`AGENTS.md`](AGENTS.md)：那里记录了上游依赖的现状（`hbb_common`/`base`
+拆分、`Stream: Drop`）、采集与码率控制的实测结论、以及一批「不要凭直觉改回去」的坑。
+仓库根的 `AGENTS.md` 属于上游，不要改它。
