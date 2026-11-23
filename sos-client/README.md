@@ -407,6 +407,25 @@ SDP offer 与 UDP 打洞的 `udp_port` 都挂在 `PunchHole` 里，所以这两�
 同内网场景下根本不会被触发。判据就是 `handle_punch_hole` 那行入口日志有没有出现，
 以及其中的 `udp_port` / `webrtc_offer`。
 
+#### 自建服务器时，控制端默认不开 UDP / WebRTC
+
+实测确认（`src/common.rs` 的 `get_local_option`）：`enable-udp-punch`、
+`enable-ipv6-punch`、`enable-webrtc` 三个选项在**未设置**时，如果信令服务器不是公共的
+rustdesk.com（即自建 hbbs），默认值取 **`N`（关闭）**。于是控制端只会做 TCP 打洞 ——
+被控端收到的 `PunchHole` 里就是 `udp_port=0 webrtc_offer=0B`，两条新传输自然不会触发。
+
+这是上游有意的保守默认（公共服务器才默认放开 P2P）。要测试需要在**控制端**打开：
+
+| 控制端界面（桌面版：设置 → 网络） | 选项键 |
+| --- | --- |
+| Enable UDP hole punching | `enable-udp-punch` |
+| Enable WebRTC P2P connection | `enable-webrtc` |
+| Enable TCP hole punching | `enable-tcp-punch` |
+| Enable IPv6 P2P connection | `enable-ipv6-punch` |
+
+手机端在「设置」页同样四项。打开后重新连接，被控端入口日志里的 `udp_port` /
+`webrtc_offer` 才会变成非 0 值。
+
 要验证这两条传输，控制端必须来自**另一个网络**（不同公网 IP），并且控制端设置里
 关了「总是使用中继」、开着对应的直连传输。另外本机若是对称 NAT，打洞本身也不会成功
 （会正常回退中继）；WebRTC 在这种情况下需要配 TURN 服务器。
