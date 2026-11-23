@@ -407,28 +407,54 @@ SDP offer 与 UDP 打洞的 `udp_port` 都挂在 `PunchHole` 里，所以这两�
 同内网场景下根本不会被触发。判据就是 `handle_punch_hole` 那行入口日志有没有出现，
 以及其中的 `udp_port` / `webrtc_offer`。
 
-#### 自建服务器时，控制端默认不开 UDP / WebRTC
-
-实测确认（`src/common.rs` 的 `get_local_option`）：`enable-udp-punch`、
-`enable-ipv6-punch`、`enable-webrtc` 三个选项在**未设置**时，如果信令服务器不是公共的
-rustdesk.com（即自建 hbbs），默认值取 **`N`（关闭）**。于是控制端只会做 TCP 打洞 ——
-被控端收到的 `PunchHole` 里就是 `udp_port=0 webrtc_offer=0B`，两条新传输自然不会触发。
-
-这是上游有意的保守默认（公共服务器才默认放开 P2P）。要测试需要在**控制端**打开：
-
-| 控制端界面（桌面版：设置 → 网络） | 选项键 |
-| --- | --- |
-| Enable UDP hole punching | `enable-udp-punch` |
-| Enable WebRTC P2P connection | `enable-webrtc` |
-| Enable TCP hole punching | `enable-tcp-punch` |
-| Enable IPv6 P2P connection | `enable-ipv6-punch` |
-
-手机端在「设置」页同样四项。打开后重新连接，被控端入口日志里的 `udp_port` /
-`webrtc_offer` 才会变成非 0 值。
-
 要验证这两条传输，控制端必须来自**另一个网络**（不同公网 IP），并且控制端设置里
 关了「总是使用中继」、开着对应的直连传输。另外本机若是对称 NAT，打洞本身也不会成功
 （会正常回退中继）；WebRTC 在这种情况下需要配 TURN 服务器。
+
+#### 为什么 hbbs 永远不带 udp_port / webrtc_offer
+
+实测与源码双向确认：**问题在服务端，不在控制端设置**。截至 `rustdesk-server` master
+（2026-11-07 的提交，其 `libs/hbb_common` 为 `69cea8da`），hbbs 做两件事使这两条传输
+无法进入被控端：
+
+1. **转发 `PunchHole` 时从零构造消息**，只填三个字段（`src/rendezvous_server.rs`，
+   `handle_punch_hole_request` 的 else 分支）：
+
+   ```rust
+   msg_out.set_punch_hole(PunchHole {
+       socket_addr,
+       nat_type: ph.nat_type,
+       relay_server,
+       ..Default::default()      // udp_port / socket_addr_v6 / force_relay 都没拷
+   });
+   ```
+
+   服务端源码里 `udp_port` 字符串**出现 0 次** —— 控制端在 `PunchHoleRequest` 里带的
+   `udp_port` 虽然协议上有这个字段（`PunchHoleRequest.udp_port = 7`），但不会被转发。
+2. **服务端那版协议根本没有 WebRTC 字段**。与本仓库的 `libs/hbb_common` 对比：
+
+   | message | 本机（SOS 用） | hbbs 用（69cea8da） |
+   | --- | --- | --- |
+   | `PunchHoleRequest` | 有 `webrtc_sdp_offer = 12` | 止于 `switch_code = 11`，无 |
+   | `PunchHole` | 有 `webrtc_sdp_offer = 10` | 止于 `controlled_context = 9`，无 |
+   | `PunchHoleSent` | 有 `webrtc_sdp_answer = 8` | 止于 `socket_addr_v6 = 7`，无 |
+   | `RelayResponse` | 有 `webrtc_sdp_answer = 12` | 止于 `upnp_port = 11`，无 |
+
+   protobuf 解析时未知字段会被丢弃，所以控制端的 offer 到不了被控端，
+   被控端的 answer 也回不去 —— 这就是日志里恒定 `udp_port=0 webrtc_offer=0B` 的原因。
+
+（次要事实，与本条无关但容易混淆：控制端的 `enable-udp-punch` / `enable-webrtc` 在
+自建服务器下**未设置**时默认关闭 —— `src/common.rs` 的 `get_local_option`，引入于
+上游提交 `645a76d43`（udp/ipv6 punch option）与 `ae6af2de4`（Webrtc）。即使把它们
+全打开，上面的服务端限制仍然成立。）
+
+**结论：要真正验证这两条传输，必须换一个会转发 `udp_port` 且协议带 WebRTC 字段的
+hbbs**（官方 master 目前不支持，需要自己给服务端打补丁或等上游跟进）。本仓库侧的
+实现与判据单测是完备的，缺的是服务端这条链路。
+
+顺带记一条服务端行为：`handle_punch_hole_request` 里若出现「一方在内网、另一方不在」
+（`peer_is_lan ^ is_lan`）或 `ALWAYS_USE_RELAY`，hbbs 会把 `nat_type` 强改成
+`SYMMETRIC` 来强制中继（注释原话 `will force relay`）。
 
 > 这条路径需要上游把 `src/lib.rs` 的 `mod kcp_stream` 公开成 `pub mod`（本项目第 4 处
 > 上游补丁，见 AGENTS §1）。`librustdesk::common::punch_udp` 上游本来就是公开的。
