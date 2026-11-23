@@ -49,6 +49,8 @@ struct Cli {
 }
 
 pub async fn run() -> ResultType<()> {
+    init_sodium();
+
     // 捕获所有 panic，输出到 stderr 防止静默崩溃
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -351,4 +353,17 @@ pub async fn run() -> ResultType<()> {
 
     log::info!("SOS client exiting.");
     Ok(())
+}
+
+/// libsodium 必须在**任何**加密调用之前初始化。
+///
+/// `sodium_init()` 会为库里每个原语挑选实现，而迟到的调用会把 Poly1305 换掉 ——
+/// 若此时别的线程正在用，同一次计算的前后半段会落在不同实现上（上游 #16974）。
+///
+/// 直接调 `hbb_common::sodiumoxide` 而不是 `librustdesk::common::init_sodium()`：
+/// 后者所在模块在上游是私有的，公开它得动 `src/lib.rs`，而本项目的上游补丁只减不增。
+fn init_sodium() {
+    if hbb_common::sodiumoxide::init().is_err() {
+        log::error!("Failed to initialize libsodium");
+    }
 }

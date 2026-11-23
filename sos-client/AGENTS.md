@@ -323,12 +323,13 @@ sos_vpx;`，直接链接库，于是按域分层：
 - `hbb_common::Stream` 现在实现 `Drop`（调用 `close_webrtc()`），不能再按值解构。
   `Conn::split` 用 `ManuallyDrop` + `ptr::read` 取出 `tcp::FramedStream`
   （该结构无 `Drop`、字段全 `pub`，目标变体已判定的安全前提写在函数文档里）。
-- **WebRTC 被链进二进制**：`Stream` 的一个变体，`drop` 会分发到 `close_webrtc()`，
-  链接器无法裁剪整条栈（产物里 200+ 处 WebRTC 串）。SOS 不走 WebRTC，但这段不是
-  死代码，改 SOS 去不掉。产物因此从 8.75 MB 涨到 13.57 MB（压缩前）。
+- **WebRTC**：`Stream` 的一个变体，`drop` 会分发到 `close_webrtc()`，链接器无法裁剪，
+  产物因此多出 ~5 MB。SOS **接受** WebRTC 入站（见 [`README.md`](README.md)「接入协议」），回答 SDP offer、
+  trickle ICE、并在签名身份里绑定 DTLS 指纹；实现全在 `net::webrtc_in` + `net::rendezvous`。
 - **版本号故意保持 `1.4.9`**（上游已 1.5.3）：`app::constants::VERSION` 会作为
-  `PeerInfo.version` 上报并驱动控制端特性开关，报 1.5.x 会让控制端尝试 sos 未
-  实现的 WebRTC 传输。改之前先确认协议面已对齐。
+  `PeerInfo.version` 上报并驱动控制端特性开关。WebRTC 传输虽然已经实现，但 1.5.x
+  还有其它 sos 没有的能力（音频、摄像头、终端、隐私模式等），报高版本会让控制端
+  放开这些开关。改之前先逐项确认协议面已对齐。
 - `libs/hbb_common` 是 git submodule，不要在父仓库里直接改它的内容。
 
 ---
@@ -828,8 +829,8 @@ ConnectionRefused = 降档；其余 = 重建（连续 5 次才降档）。
 | 限制 | 原因 |
 | --- | --- |
 | `WTSDisconnected` 会话黑屏 | 系统不为该会话合成表面，应用层无解；已改为显示状态图 |
-| 产物含 WebRTC 栈（+5MB） | 上游把 WebRTC 做成 `Stream` 变体，`drop` 分发到 `close_webrtc()`，链接器无法裁剪 |
-| UDP 打洞未实现 | 依赖上游私有 `mod kcp_stream`；TCP 打洞 + 中继已够用（控制端 `select_ok` 会选中 TCP 分支） |
+| 产物含 WebRTC 栈（+5MB） | 上游把 WebRTC 做成 `Stream` 变体，`drop` 分发到 `close_webrtc()`，链接器无法裁剪。**传输本身已支持**（见 README「接入协议」） |
+| UDP 打洞（KCP）未实现 | 依赖上游私有 `mod kcp_stream`（把 `kcp_stream` 改成 `pub` 会是第 4 处上游补丁）。控制端仍可选 WebRTC 走 UDP：那条路径由 DTLS/ICE 负责，与本项无关 |
 | 音频 / 端口转发 / 摄像头 / 隐私模式 / 远程打印 / 终端服务 | 有意移除 |
 | 4 核机上 VP9 1080p 编不到 30fps | 软件编码物理上限；由 `ENC_LEVEL` 逐级降 `cpu-used`，实测不划算才试 VP8 |
 | ~~AMD（AMF）机器上没有硬件 H.264~~ **已修复** | 三层原因叠在一起，缺一层都不行：(1) `hwcodec` 给 AMF 设私有选项 `query_timeout`，**FFmpeg 7.1 已移除该选项** ⇒ `Option not found`；(2) 更关键的是 FFmpeg 侧还要有上游的 `0008-remove-amf-loop-query` 补丁，否则 AMF 的 `QueryOutput` 阻塞轮询会让**试编码超时**（实测 `Encoder h264_amf test attempt 1 returned error: -1`），编码器建得出来但探测判它不可用；(3) `hwcodec` 把「设调优项失败」当致命错误，直接放弃编码器。**上游能用的原因是它自己的 vcpkg overlay 给 FFmpeg 打了这两个补丁**（`res/vcpkg/ffmpeg/patch/0001`、`0008`）。SOS 的做法（全部在 `sos-client/` 内，**上游一行没改**）：`sos-client/vcpkg/ffmpeg/` = 完整 FFmpeg 端口 + 这两个上游补丁（上游 overlay 会 `--disable-swresample`，而 hwcodec 的 `dec.o` 需要 `swr_*`，所以不能直接复用上游 overlay）；`sos-client/vendor/hwcodec/` = 本地副本，把调优项失败降级为警告。实测（Radeon 780M，`tests/hw_vs_sw_bench`，软件侧现已跑**生产** `video::vpx`）：1600x900 VP9 3.43ms → AMF **2.85ms**；1080p 3.93ms → **3.49ms**，`max` 24.3-24.9ms → **9.4-10.8ms**。**旧记录的 9.5/12.0ms 是上游编码器数（它每帧 `flush()`，比生产链路慢一倍多），不能当基准**：8 核机上硬件只快 11%-17%，真正的收益在 4 核机（1080p 软编 24-27ms）与最差帧延迟上。 |

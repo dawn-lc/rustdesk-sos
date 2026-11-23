@@ -89,10 +89,15 @@ cargo build --release --no-default-features
       --overlay-ports="<repo>\sos-client\vcpkg" --classic
   ```
 
-  这个 overlay port 是「vcpkg 官方 7.1.2 端口 + 上游那两个 AMF 补丁」（见
-  `vcpkg/ffmpeg/`）。**不能直接用仓库根的 `res/vcpkg` overlay**：那个端口
-  `--disable-swresample`，而 hwcodec 的 `dec.o`（opus 解码）需要 `swr_*`，
-  链接会报 `LNK2019`。
+  overlay 目录里有两个端口：
+
+  - `vcpkg/ffmpeg/` = vcpkg 官方 7.1.2 端口 + 上游那两个 AMF 补丁。
+    **不能直接用仓库根的 `res/vcpkg` overlay**：那个端口 `--disable-swresample`，
+    而 hwcodec 的 `dec.o`（opus 解码）需要 `swr_*`，链接会报 `LNK2019`。
+  - `vcpkg/mfx-dispatch/` = 上游 vendor 的端口副本（含 `fix-missing-cstdint-import.patch`）。
+    FFmpeg 的 `amf` 特性依赖 `mfx-dispatch`，而 vcpkg 官方端口会去 GitHub 下
+    commit 的 `.patch`，匿名请求返回 HTTP 429；新 MSVC/gcc13 又要求显式 `#include
+    <cstdint>`。带这个 overlay 才不会被卡住。两个端口的文件与上游 `res/vcpkg/` 逐字节一致。
 
 运行期行为（不需要任何新参数）：
 
@@ -326,6 +331,70 @@ rustdesk-sos.exe -m hbbs.example.com
 
 > 这条判断只看**本机**状态（`capture::uac::secure_desktop` + 会话是否还有合成表面），
 > 不看请求方，也不受「谁正在连接」影响。
+
+### 接入协议（TCP / 中继 / WebRTC）
+
+控制端能在自己的设置里挑传输方式，本端要能接受它挑的任意一种：
+
+| 传输 | 状态 | 说明 |
+| --- | --- | --- |
+| TCP 打洞（直连） | 支持 | `net::rendezvous::handle_punch_hole` → `punch_tcp_and_serve`，先 IPv4 再 IPv6 |
+| TCP 中继 | 支持 | 打洞不适用（对称 NAT / `force_relay`）或失败时改走 hbbr |
+| **WebRTC** | 支持 | `net::webrtc_in`，UDP 上的 DTLS 通道，见下 |
+| UDP 打洞（KCP） | 未实现 | 依赖上游私有的 `mod kcp_stream`，见 AGENTS §11 |
+
+#### WebRTC 入站流程
+
+```text
+控制端                          本端（sos）                       hbbs
+  │  PunchHole{webrtc_sdp_offer}    │                                │
+  ├───────────────────────────────►│                                │
+  │                                │ WebRTCStream::new(offer)       │
+  │                                │  └─ 得到 SDP answer + 本端候选 │
+  │                                │ PunchHoleSent{webrtc_sdp_answer}│
+  │                                ├───────────────────────────────►│（独立加密 TCP）
+  │                                │ IceCandidate（本端候选）        │
+  │                                ├───────────────────────────────►│
+  │        PunchHoleResponse{answer}                                │
+  │◄───────────────────────────────────────────────────────────────┤
+  │  IceCandidate（对端候选）       │                                │
+  ├───────────────────────────────►│                                │
+  │◄══════ DTLS/ICE 打通后即 Stream::WebRTC ═══════════════════════►│
+```
+
+打通之后这条连接与 TCP 会话**没有任何区别**（`net::connection::handle` 同一套逻辑），
+视频/输入/剪贴板/文件全部照常。，
+
+#### 三条不能省的细节
+
+1. **answer 与 ICE 候选必须走加密通道。** 候选里是本机每块网卡的地址，明文发等于
+   自曝内网拓扑。所以本端单独开一条 TCP 连 hbbs 并强制
+   `librustdesk::common::secure_tcp_required`；拿不到加密通道就放弃本次候选。
+2. **重复的 offer 不能再建 answerer。** 控制端每次打洞重试都重发同一个 offer，而
+   `WebRTCStream::new` 对相同 offer 有共享缓存：`take_local_ice_rx()` 每个 pc 只成功
+   一次。第二次拿到 `None` 就只回 answer、不再起连接任务 —— 否则两个任务抢读同一条
+   data channel，握手互相踩烂。
+3. **签名身份里必须绑定 DTLS 指纹。** 本端把自己的 DTLS 证书指纹签进 `IdPk`
+   （`net::connection::setup_encrypted_stream`），控制端会拿它和实际协商出的 DTLS 通道
+   比对（`dtls_fingerprint_bound`），不一致说明 SDP 途中被换过，它会直接拒绝 —— 这
+   正是防止信令服务器/中继替换指纹的机制，不能省。
+
+另有两条与上游一致的取舍：`force_relay` 单独出现时按 Relay-only 处理（除非 offer 信封
+里声明 `ice_policy: all`），而 Relay-only 需要 TURN 服务器（`WebRTCStream::has_turn_server`），
+没有就拒答、让控制端走别的传输；代理模式下不答 WebRTC（ICE 会绕过代理暴露真实 IP）。
+
+#### 日志
+
+| 关键字 | 含义 |
+| --- | --- |
+| `[CONN] WebRTC offer received` | 收到 offer，开始建 answer |
+| `[CONN] PunchHoleSent（含 WebRTC answer）已通过加密通道发回` | answer 已送出 |
+| `[WEBRTC] ICE connected, handing the session over` | ICE 打通，交给会话层 |
+| `[WEBRTC] wait_connected failed` | 没打通（候选/TURN/防火墙问题），控制端会回退 |
+| `[WEBRTC] duplicate offer` | 重试命中缓存，正常 |
+
+> **端到端验证需要控制端主动选 WebRTC**：把控制端的传输方式设成 WebRTC 再连一次，
+> 日志里应能看到上面第 1、2、3 行依次出现。只有实在连不上时才会回退 TCP/中继。
 
 ### 单实例
 

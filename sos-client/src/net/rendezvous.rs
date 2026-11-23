@@ -229,6 +229,10 @@ async fn handle_rendezvous_message(
                 }
             });
         }
+        Some(rendezvous_message::Union::IceCandidate(ice)) => {
+            // WebRTC 的 trickle 候选：按 session_key 投给对应会话的 ICE agent。
+            crate::net::webrtc_in::on_ice_candidate(ice).await;
+        }
         Some(rendezvous_message::Union::RequestRelay(rr)) => {
             log::info!("收到 RequestRelay（中继请求），建立中继连接...");
             let config = (*config).clone();
@@ -561,6 +565,17 @@ async fn handle_punch_hole(
         our_nat
     );
 
+    // 控制端要用 WebRTC 时，SDP answer 必须随 PunchHoleSent / RelayResponse 一起
+    // 回给对端，所以要在下面两条分支之前建好。答不出来就是空串 —— 对端会自行
+    // 回退到 TCP 打洞或中继。
+    let webrtc_answer = if crate::net::webrtc_in::viable(&ph) {
+        log::info!("[CONN] WebRTC offer received, building SDP answer...");
+        crate::net::webrtc_in::answer(ph.clone(), config.clone(), password_refresh_tx.clone())
+            .await
+    } else {
+        String::new()
+    };
+
     let must_relay =
         crate::net::relay::must_relay(ph.force_relay, remote_nat, our_nat, peer_addr.port());
     if must_relay {
@@ -578,8 +593,16 @@ async fn handle_punch_hole(
             ph.socket_addr.clone(),
             None,
             "",
+            webrtc_answer.clone(),
         )
         .await;
+    }
+
+    // WebRTC 会话不做 TCP 打洞：控制端要留着它的请求 socket 收 trickle 候选，
+    // 而 answer 走一条独立的加密 TCP 回给 hbbs（默认部署下信令通道是 UDP，hbbs 对
+    // 到达 UDP 的 PunchHoleSent 会按 UDP 打洞语义处理源地址，不能复用）。
+    if !ph.webrtc_sdp_offer.is_empty() {
+        return send_punch_hole_sent_webrtc(&ph, &config, webrtc_answer).await;
     }
 
     // 主路径：IPv4 TCP 打洞
@@ -603,8 +626,54 @@ async fn handle_punch_hole(
         ph.socket_addr.clone(),
         None,
         "",
+        webrtc_answer,
     )
     .await
+}
+
+/// 只把 `PunchHoleSent`（含 WebRTC 的 SDP answer）发回信令服务器。
+///
+/// WebRTC 会话不走 TCP 打洞：控制端要留着它自己的请求 socket 收 trickle 候选，
+/// 所以本端只需要告诉 hbbs「answer 在这里」。这条连接必须是**加密**的 —— answer
+/// 里的 ICE 凭据和候选地址不能明文过网（上游 `secure_tcp_required` 同款要求）。
+///
+/// hbbs 对这个 `PunchHoleSent` 只做转发，不做 UDP 打洞配对，因此单独开一条短连接
+/// 发完即关，不复用 UDP 信令 socket。
+async fn send_punch_hole_sent_webrtc(
+    ph: &PunchHole,
+    config: &SosConfig,
+    webrtc_sdp_answer: String,
+) -> ResultType<()> {
+    use hbb_common::protobuf::Enum;
+    use hbb_common::rendezvous_proto::PunchHoleSent;
+
+    let host = check_port(
+        &config.rendezvous_server,
+        crate::app::constants::RENDEZVOUS_PORT,
+    );
+    let mut stream = connect_tcp(host, crate::app::constants::CONNECT_TIMEOUT).await?;
+    librustdesk::common::secure_tcp_required(
+        &mut stream,
+        &crate::net::webrtc_in::licence_key(config),
+    )
+    .await?;
+
+    let our_nat =
+        NatType::from_i32(crate::app::config::get_nat_type()).unwrap_or(NatType::UNKNOWN_NAT);
+    let mut msg = RendezvousMessage::new();
+    msg.set_punch_hole_sent(PunchHoleSent {
+        socket_addr: ph.socket_addr.clone(),
+        id: config.id.clone(),
+        relay_server: ph.relay_server.clone(),
+        nat_type: our_nat.into(),
+        version: crate::app::constants::VERSION.to_string(),
+        socket_addr_v6: ph.socket_addr_v6.clone(),
+        webrtc_sdp_answer,
+        ..Default::default()
+    });
+    stream.send(&msg).await?;
+    log::info!("[CONN] PunchHoleSent（含 WebRTC answer）已通过加密通道发回");
+    Ok(())
 }
 
 /// TCP 打洞并在打出的端口上监听，成功后把连接交给 `crate::net::connection::handle`
@@ -719,6 +788,8 @@ async fn handle_request_relay(
         rr.socket_addr.clone(),
         uuid,
         &peer_id,
+        // RequestRelay 不带 SDP offer，WebRTC 只从 PunchHole 进来。
+        String::new(),
     )
     .await
 }
@@ -741,6 +812,7 @@ async fn handle_relay_fallback(
     peer_socket_addr: hbb_common::bytes::Bytes,
     uuid: Option<String>,
     peer_id: &str,
+    webrtc_sdp_answer: String,
 ) -> ResultType<()> {
     log::info!(
         "[CONN] >>> handle_relay_fallback: relay='{}' uuid={:?} peer_id='{}'",
@@ -808,6 +880,9 @@ async fn handle_relay_fallback(
         rr.relay_server = chosen_relay.clone();
         rr.set_id(config.id.clone());
         rr.version = crate::app::constants::VERSION.to_string();
+        // 中继路径也要把 WebRTC answer 带回去：对端据此在中继之上建 DTLS，
+        // 于是这条会话同样是端到端加密的，而不是明文经中继。
+        rr.webrtc_sdp_answer = webrtc_sdp_answer;
         let mut msg = hbb_common::rendezvous_proto::RendezvousMessage::new();
         msg.set_relay_response(rr);
 

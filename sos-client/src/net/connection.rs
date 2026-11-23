@@ -265,14 +265,27 @@ async fn setup_encrypted_stream(mut stream: Stream, device_id: &str) -> ResultTy
     // 生成临时 NaCl box 密钥对
     let (na_pk, na_sk) = box_::gen_keypair();
 
+    // WebRTC 传输自带 DTLS 加密，但必须把自己的 DTLS 证书指纹签进 `IdPk`：
+    // 控制端会拿签名里的指纹和它实际协商出的 DTLS 通道比对
+    // （`dtls_fingerprint_bound`），不一致说明 SDP 在途中被改过（信令服务器或
+    // 中继换掉了指纹），控制端会直接拒绝这次连接。
+    //
+    // 非 WebRTC 传输上留空（`..Default::default()`）：TCP/中继的机密性由下面的
+    // NaCl 流密钥负责，与 DTLS 无关。指纹取不到时按失败处理 —— 签一个空指纹只会
+    // 让对端在浪费一个来回之后才失败。
+    let dtls_fingerprint = stream.dtls_fingerprint(true).await.unwrap_or_default();
+    if stream.is_webrtc() && dtls_fingerprint.is_empty() {
+        anyhow::bail!("WebRTC local DTLS fingerprint unavailable");
+    }
+
     // 构造 IdPk 并序列化
     //
     // `IdPk` 定义在 `hbb_common` 的 rendezvous 协议里（与信令服务器共用），
-    // 不在客户端的 message 协议中。上游新增的 `dtls_fingerprint` / `kx_version`
-    // 与本端无关（非 WebRTC、原始密钥交换），用 `..Default::default()` 留空。
+    // 不在客户端的 message 协议中。
     let id_pk_bytes = hbb_common::rendezvous_proto::IdPk {
         id: device_id.to_string(),
         pk: hbb_common::bytes::Bytes::from(na_pk.0.to_vec()),
+        dtls_fingerprint,
         ..Default::default()
     }
     .write_to_bytes()?;
