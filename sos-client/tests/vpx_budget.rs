@@ -16,8 +16,7 @@
 
 #![cfg(all(windows, sos_vpx))]
 
-#[path = "../src/sos_vpx.rs"]
-mod sos_vpx;
+use rustdesk_sos::video::vpx as sos_vpx;
 
 use sos_vpx::{SosCodec, SosVpxConfig, SosVpxEncoder};
 use std::time::Instant;
@@ -190,6 +189,7 @@ fn measure(codec: SosCodec, cpu_used: u32, target_kbps: u32, frames: usize) -> S
 ///
 /// 若在「实际使用的码率」处量化器就贴着 63，说明码率是画质瓶颈。
 #[test]
+#[ignore = "实机基准，默认不跑；cargo test -- --ignored 或 --test <name> -- --ignored"]
 fn t1_quantizer_vs_bitrate_desktop_text() {
     println!("VP9 1600x900 桌面文字内容 @30fps —— 量化器越高越糊");
     println!("rc_max_quantizer = 63（贴 63 = 画质被码率压死）");
@@ -217,6 +217,7 @@ fn t1_quantizer_vs_bitrate_desktop_text() {
 /// VP8 的压缩效率低约 20-30%，若它在相同码率下量化器更高，
 /// 说明「降级到 VP8」会额外损失画质 —— 这会影响降级策略的取舍。
 #[test]
+#[ignore = "实机基准，默认不跑；cargo test -- --ignored 或 --test <name> -- --ignored"]
 fn t2_vp8_quantizer_same_content() {
     println!("VP8 1600x900 桌面文字内容 @30fps（对照 VP9）");
     println!(
@@ -237,6 +238,7 @@ fn t2_vp8_quantizer_same_content() {
 /// 若这个码率明显高于 2604kbps（Best 档），就证明当前的码率公式
 /// 对桌面文字内容确实太保守。
 #[test]
+#[ignore = "实机基准，默认不跑；cargo test -- --ignored 或 --test <name> -- --ignored"]
 fn t3_bitrate_needed_for_crisp_text() {
     println!("找到「文字清晰」所需码率：量化器均值 <= 20 视为清晰");
     println!(
@@ -268,6 +270,7 @@ fn t3_bitrate_needed_for_crisp_text() {
 ///
 /// 两者给出的「需求码率」区间才是可以拿来定参数的依据。
 #[test]
+#[ignore = "实机基准，默认不跑；cargo test -- --ignored 或 --test <name> -- --ignored"]
 fn t4_dense_vs_strokes() {
     println!("1600x900 两种文字内容在同一码率下的量化器对比");
     println!("（dense = 准随机点阵，最坏情况；strokes = 笔画字形，接近真实字体）");

@@ -18,8 +18,7 @@
 
 #![cfg(all(windows, sos_vpx))]
 
-#[path = "../src/sos_vpx.rs"]
-mod sos_vpx;
+use rustdesk_sos::video::vpx as sos_vpx;
 
 use sos_vpx::{SosCodec, SosVpxConfig, SosVpxEncoder};
 use std::time::Instant;
@@ -118,11 +117,13 @@ fn codec_name(c: SosCodec) -> &'static str {
     match c {
         SosCodec::Vp8 => "VP8",
         SosCodec::Vp9 => "VP9",
+        SosCodec::H264 => "H264",
     }
 }
 
 /// 本机核数，用于把结论外推到目标机
 #[test]
+#[ignore = "实机基准，默认不跑；cargo test -- --ignored 或 --test <name> -- --ignored"]
 fn t0_host_info() {
     let cpus = std::thread::available_parallelism()
         .map(|n| n.get())
@@ -136,6 +137,7 @@ fn t0_host_info() {
 
 /// **核心实验**：1600x900 下 VP9 的 threads × cpu_used 网格
 #[test]
+#[ignore = "实机基准，默认不跑；cargo test -- --ignored 或 --test <name> -- --ignored"]
 fn t1_vp9_grid_1600x900() {
     let (w, h) = (1600usize, 900usize);
     println!("VP9 {}x{} (目标 {}kbps)  —— 编码 ≤26ms 才能跑到 30fps", w, h, SosVpxConfig::default_bitrate_kbps(w, h));
@@ -167,6 +169,7 @@ fn t1_vp9_grid_1600x900() {
 /// 硬扛 VP9 更有价值 —— 画面更流畅，而 1600x900 下 VP8 的画质损失
 /// 远小于 20fps 卡顿带来的损失。
 #[test]
+#[ignore = "实机基准，默认不跑；cargo test -- --ignored 或 --test <name> -- --ignored"]
 fn t2_vp8_vs_vp9_1600x900() {
     let (w, h) = (1600usize, 900usize);
     println!("VP8 vs VP9 @ {}x{}", w, h);
@@ -195,6 +198,7 @@ fn t2_vp8_vs_vp9_1600x900() {
 
 /// 1080p 的同一张网格，确认分辨率对耗时的影响是否线性
 #[test]
+#[ignore = "实机基准，默认不跑；cargo test -- --ignored 或 --test <name> -- --ignored"]
 fn t3_vp9_grid_1920x1080() {
     let (w, h) = (1920usize, 1080usize);
     println!("VP9 {}x{} (目标 {}kbps)", w, h, SosVpxConfig::default_bitrate_kbps(w, h));

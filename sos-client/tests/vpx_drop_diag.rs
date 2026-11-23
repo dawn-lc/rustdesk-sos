@@ -19,8 +19,7 @@
 
 #![cfg(all(windows, sos_vpx))]
 
-#[path = "../src/sos_vpx.rs"]
-mod sos_vpx;
+use rustdesk_sos::video::vpx as sos_vpx;
 
 use sos_vpx::{SosCodec, SosVpxConfig, SosVpxEncoder};
 use std::time::{Duration, Instant};
@@ -125,6 +124,7 @@ fn run(buf_ms: u32, thresh: u32, irregular: bool, seconds: f64) -> Outcome {
 }
 
 #[test]
+#[ignore = "实机基准，默认不跑；cargo test -- --ignored 或 --test <name> -- --ignored"]
 fn drop_rate_under_irregular_cadence() {
     println!("目标 1675kbps，桌面向内容，5 秒");
     println!(
@@ -239,6 +239,7 @@ fn measure_paced(
 /// 从没单独验证过。如果只靠 quantizer 上限就能守住码率，
 /// 那就应当把丢帧**彻底关掉**（用户要求「允许丢帧、尽量不丢」）。
 #[test]
+#[ignore = "实机基准，默认不跑；cargo test -- --ignored 或 --test <name> -- --ignored"]
 fn dropframe_thresh_is_not_required_for_rate_control() {
     println!("运动内容 60 帧（30fps 真实节奏），buf=200ms");
     println!(
@@ -279,6 +280,7 @@ fn dropframe_thresh_is_not_required_for_rate_control() {
 /// 于是立刻又去采集下一帧 —— 编码调用频率可能高于标称 30fps。
 /// 若下面的表格显示「喂得越快，丢得越多」，就证明存在丢帧正反馈。
 #[test]
+#[ignore = "实机基准，默认不跑；cargo test -- --ignored 或 --test <name> -- --ignored"]
 fn overfeeding_causes_self_inflicted_drops() {
     println!("桌面内容 60 帧，目标 1675kbps，thresh=20（生产配置），buf=200ms");
     println!(
@@ -313,6 +315,7 @@ fn overfeeding_causes_self_inflicted_drops() {
 /// `set_bitrate()` —— 而它背后是 `vpx_codec_enc_config_set()`，
 /// 每次调用都会在 libvpx 内部重走一遍配置流程。
 #[test]
+#[ignore = "实机基准，默认不跑；cargo test -- --ignored 或 --test <name> -- --ignored"]
 fn frequent_set_bitrate_does_not_cause_drops() {
     println!("桌面内容 90 帧，目标在 1400/1675/1950 之间轮转，buf=200ms thresh=20");
     println!(

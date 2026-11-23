@@ -17,8 +17,7 @@
 
 #![cfg(all(windows, sos_vpx))]
 
-#[path = "../src/sos_qos.rs"]
-mod sos_qos;
+use rustdesk_sos::video::qos as sos_qos;
 
 use sos_qos::{SosQos, BR_BALANCED, BR_BEST, BR_LOW, DEFAULT_FPS, MIN_FPS, QUEUE_BAD_MS};
 
@@ -324,7 +323,6 @@ fn three_displays_three_viewers() {
     assert!(q.fps(DP1) < DEFAULT_FPS, "DP1 拥塞");
     assert_eq!(q.fps(DP2), DEFAULT_FPS);
 }
-
 
 // ── 画质选项是否真的生效 ──
 //

@@ -7,8 +7,8 @@ RustDesk 的裁剪版**受控端**（被控方）。仅支持 Windows，单一�
 
 |          | 上游 RustDesk                      | 本项目                                              |
 | -------- | ---------------------------------- | --------------------------------------------------- |
-| 视频编码 | 平台硬件编码 + VP8/VP9 软件编码    | **仅自建 VP8/VP9**（`libvpx`），不启用硬件编码      |
-| 视频链路 | `scrap::Encoder` + `video_service` | 自建 `sos_video` 采集→编码→发送链路                 |
+| 视频编码 | 平台硬件编码 + VP8/VP9 软件编码    | 自建 VP8/VP9（`libvpx`）+ 硬件 H.264（`hwcodec`）   |
+| 视频链路 | `scrap::Encoder` + `video_service` | 自建 `video` 采集→编码→发送链路                     |
 | QoS      | 全局标量                           | **按显示器独立**（每屏独立采集器/编码器/帧率/画质） |
 | 界面     | Flutter / Sciter                   | 仅托盘                                              |
 | 音频     | 支持                               | **不支持**                                          |
@@ -18,10 +18,11 @@ RustDesk 的裁剪版**受控端**（被控方）。仅支持 Windows，单一�
 ## 功能
 
 - ✅ 屏幕捕获：DXGI（首选，约 5ms）→ GDI（回退，约 50ms）
-- ✅ 编码：VP9（默认）/ VP8，可被控制端的编码偏好覆盖
+- ✅ 编码：VP9（默认）/ VP8（`libvpx`）；带硬件编码的构建另可用 H.264（见下），均可被控制端的编码偏好覆盖
 - ✅ 鼠标键盘输入注入
 - ✅ 剪贴板同步（文本 + 文件列表）
 - ✅ 文件传输
+- ✅ 同意受控：每次连接都等本机用户点「同意」（Win32 置顶弹窗，与密码二选一，无开关）
 - ✅ UAC 安全桌面：SYSTEM 子进程通过共享内存送帧，可在提权对话框上操作
 - ✅ 多显示器：每块屏独立的采集管线与 QoS
 - ✅ 编码成本自适应：编不进帧预算时逐级降 `cpu-used`，再不行才试 VP8（实测不划算会自行回退）
@@ -39,10 +40,13 @@ cargo xtask
 
 产物有两个，用途不同：
 
-| 路径                              | 说明                                                    |
-| --------------------------------- | ------------------------------------------------------- |
-| `target\release\rustdesk-sos.exe` | cargo 原样输出，**不压缩**，供增量编译使用              |
-| `dist\rustdesk-sos.exe`           | 交付物，UPX 压缩后（实测 **13.57 MB → 3.98 MB，29.4%**） |
+| 路径                              | 说明                                                          |
+| --------------------------------- | ------------------------------------------------------------- |
+| `target\release\rustdesk-sos.exe` | cargo 原样输出，**不压缩**，供增量编译使用                    |
+| `dist\rustdesk-sos.exe`           | 交付物，UPX 压缩后（带硬件编码实测 **28.05 MB → 8.97 MB，32.0%**）|
+
+默认构建带硬件编码（静态 FFmpeg + 厂商 SDK），所以体积比纯软件版本大一倍多：
+纯软件版本（`--no-default-features`）是 **13.60 MB → 4.24 MB（31.2%）**。
 
 体积几乎全部来自上游 `librustdesk`：sos 自己只负责采集/编码/连接，但 `Stream`、
 `input_service`、`clipboard` 等都复用上游实现。2026-11 同步上游 master 后产物
@@ -51,8 +55,75 @@ cargo xtask
 链接器因此无法裁剪整条 WebRTC 栈。sos 自身不走 WebRTC，但这段代码不是死代码。
 
 `build.rs` 用 `bindgen` 生成 libvpx 绑定。视频链路**强依赖**它：没有 libvpx 时
-`build.rs` 不会置 `sos_vpx`，`main.rs` 里对应的 `compile_error!` 会直接说明原因
+`build.rs` 不会置 `sos_vpx`，`src/lib.rs` 里对应的 `compile_error!` 会直接说明原因
 （早先那条「回退到上游 `video_service`」的分支其实编译不过，已删除）。
+
+### 硬件编码（H.264，默认开启）
+
+软件链路只有 VP8/VP9。想在弱 CPU 机器上跑满 1080p30，可以编进硬件 H.264：
+
+**硬件编码默认开启**（`default = ["hwcodec"]`），所以普通的 `cargo xtask` 出的就是
+支持硬件编码的版本：
+
+```powershell
+cargo xtask
+```
+
+只想出纯软件编码的版本（不需要 FFmpeg 静态库、体积回到 13.6 MB）：
+
+```powershell
+cargo build --release --no-default-features
+```
+
+**FFmpeg 是静态链进产物的**（`hwcodec/build.rs` 把 `$VCPKG_ROOT/installed/<triplet>/lib/`
+下的 `avcodec`/`avutil`/`avformat` 等以静态库形式链接），所以：
+
+- **目标机器不需要安装 FFmpeg**，产物里也没有 ffmpeg 的 DLL 依赖；
+- 但**构建机器**上要先装好那份静态库，命令如下（一次即可，装进
+  `$VCPKG_ROOT/installed`，正是 `hwcodec/build.rs` 写死的路径）：
+
+  ```powershell
+  # 从没有 vcpkg.json 的目录执行（否则会进 manifest 模式，忽略 --classic）
+  cd $env:VCPKG_ROOT
+  .\vcpkg.exe install "ffmpeg[amf,nvcodec,qsv]:x64-windows-static" `
+      --overlay-ports="<repo>\sos-client\vcpkg" --classic
+  ```
+
+  这个 overlay port 是「vcpkg 官方 7.1.2 端口 + 上游那两个 AMF 补丁」（见
+  `vcpkg/ffmpeg/`）。**不能直接用仓库根的 `res/vcpkg` overlay**：那个端口
+  `--disable-swresample`，而 hwcodec 的 `dec.o`（opus 解码）需要 `swr_*`，
+  链接会报 `LNK2019`。
+
+运行期行为（不需要任何新参数）：
+
+- 启动时后台线程探测一次可用编码器，**探测完成前一律按「没有硬件」处理**；
+- 有可用编码器、且控制端声明 `ability_h264` 时，视频走 H.264 硬件编码；
+- 没有硬件、探测失败、或初始化失败 → 自动回落 VP9 软件编码（`[HWENC]` 日志会说明原因）；
+- 控制端工具栏里能不能看到 H.264 选项，取决于 `PeerInfo.encoding.h264`，我们只在本机
+  真的能用时才声明它。
+
+> **AMD（AMF）也能用**（已在 Radeon 780M 上验证）。这条链路曾经完全不工作，原因有三层，
+> 缺一层都不行：
+>
+> 1. hwcodec 给 AMF 设私有选项 `query_timeout`，而 FFmpeg 7.1 已把它移除；
+> 2. 更要紧的是 FFmpeg 侧还缺上游的 `0008-remove-amf-loop-query` 补丁 —— 缺了它 AMF 的
+>    `QueryOutput` 阻塞轮询会让**试编码超时**（`Encoder h264_amf test attempt 1 returned
+>    error: -1`），编码器建得出来但探测判它不可用；
+> 3. hwcodec 把「设调优项失败」当致命错误，直接放弃整个编码器。
+>
+> 所以上面那条 vcpkg 命令带的 overlay 就是 (1)(2)，`vendor/hwcodec` 的本地副本负责 (3)。
+> **上游仓库一行没改**，全部落在 `sos-client/` 内。
+>
+> NVENC 用 `delay`、QSV 用 `async_depth`，这两个选项在 FFmpeg 7 里还在，不受影响。
+
+同机实测（Radeon 780M，`cargo test --release --test hw_vs_sw_bench`）：
+
+| 分辨率 | VP9 软编 | H.264 AMF | 最大单帧耗时 |
+| --- | --- | --- | --- |
+| 1600x900 | 9.5 ms | **3.1 ms** | 44 ms → 11.4 ms |
+| 1920x1080 | 12.0 ms | **3.8 ms** | 57 ms → 11.6 ms |
+
+
 
 ### IDE 接入（rust-analyzer）
 
@@ -215,6 +286,47 @@ rustdesk-sos.exe -m hbbs.example.com -r relay1.example.com,relay2.example.com
 —— 该字段会被 hbbs 转发给对端，对端据此决定连哪台，报错就会配不上。
 全部失败时错误信息会列出每台的失败原因。
 
+### 同意受控（默认开启，无开关）
+
+**每次连接都要本机用户点一下「同意」**，不需要任何参数。它与输入密码**二选一**、
+谁先完成谁生效（与上游 `approve-mode=both` 一致）：
+
+```powershell
+rustdesk-sos.exe -m hbbs.example.com
+```
+
+- 弹窗显示请求方 ID / 名称 / 平台 / 来源地址 / 请求类型（远程桌面或文件传输），
+  以及 180 秒倒计时；超时、点「拒绝」、直接关窗口都算拒绝。
+- **弹窗出现时，控制端仍停在它自己的密码输入框上** —— 两个界面并存，这正是上游的行为。
+  本端不会回任何会把那个密码框顶掉的响应，所以控制端可以继续输密码；输对了立即
+  建立会话（弹窗自动关闭），不必再点「同意」。
+- 等待期间每 10 秒给控制端发一个空包保活：控制端发出登录请求后有一个 30 秒
+  「无数据」看门狗（`src/client/io_loop.rs`），不发就会被它判超时断开。空包不触发
+  任何 UI 变化，密码框照旧留在屏幕上。控制端若在等待期间断开，弹窗会立刻自动关闭。
+- 拒绝后连接**立即关闭**，控制端看到的是「Closed manually by the peer」——
+  与上游 RustDesk 里点 Cancel 时完全一致，且不会出现「重试」按钮（否则点一下又会
+  重新弹窗）。
+- 实现是 Win32（`RegisterClassW` + 消息循环 + `SetTimer` 超时），不引入任何 UI 框架；
+  消息循环跑在阻塞线程上，不影响会话本身。
+- 若弹窗建不出来（无交互桌面 / 资源耗尽 / win32 调用失败），**不算拒绝**：退回
+  「只认密码」，控制端照常输密码即可。弹窗是密码的替代路径，缺了它不该把合法用户
+  挡在门外。
+
+**锁屏 / UAC 期间不弹窗**：那时活动桌面是 Winlogon，而窗口只能建在用户 Default 桌面
+上 —— 用户既看不见也点不到，弹出来只会白等到 180 秒再拒绝，等于把「有人在场」误判成
+「无人值守」。所以这两种情况（以及会话已断开，例如退出 RDP）**直接跳过弹窗**，
+退回「密码即授权」：用户解锁后下一次连接就会正常弹窗。
+
+由此得到一个符合直觉的组合：
+
+| 机器状态 | 怎么连 |
+| --- | --- |
+| 已解锁、有人在场 | 点弹窗「同意」**或**输密码，二选一 |
+| 锁屏 / UAC / 无人在场 | 只能输密码（不弹窗，不会白等 180s） |
+
+> 这条判断只看**本机**状态（`capture::uac::secure_desktop` + 会话是否还有合成表面），
+> 不看请求方，也不受「谁正在连接」影响。
+
 ### 单实例
 
 程序持有 `Global\RustDeskSOS_main` 互斥体，重复启动会提示后退出。
@@ -234,52 +346,117 @@ rustdesk-sos.exe -m hbbs.example.com -r relay1.example.com,relay2.example.com
 
 ## 代码结构
 
-`src/` 全部平铺并用 `sos_` 前缀，是为了让 `tests/*.rs` 能用
-`#[path = "../src/sos_xxx.rs"] mod sos_xxx;` 单独复用某个模块做单测
-（测试里的 `crate::sos_xxx` 因此也能解析）。`main.rs` 顶部有同一份模块地图。
+`src/` 是「库 + 薄二进制」+ 按域分层：`src/lib.rs` 是库根（`pub mod` 七个域），
+`src/main.rs` 只剩 GUI 子系统声明和 `#[tokio::main]` → `app::run()`。集成测试用
+`use rustdesk_sos::…` 直接链接库，不再用 `#[path]` 把源文件重新编进每个测试二进制。
+以前的结构是全部平铺的 `sos_*.rs` + 二进制 only，分层的理由与取舍见
+[`AGENTS.md`](AGENTS.md) §2。
 
 ```
 src/
-  main.rs            入口、模式分发、SYSTEM 子进程看门狗
-  ── 启动 / 进程 ──
-  sos_bootstrap.rs   提权检查、单实例、日志
-  sos_config.rs      注册表配置、ID/密码
-  sos_constants.rs   全局常量与 Windows 对象名
-  sos_system.rs      SYSTEM 子进程入口与令牌提升
-  sos_tray.rs        托盘
-  sos_cpu.rs         CPU 占用采样（GetSystemTimes，不用 PDH）
-  ── 捕获 ──
-  sos_capture.rs     SYSTEM 子进程的采集线程（写共享内存）
-  sos_dxgi.rs        DXGI Desktop Duplication 捕获
-  sos_gdi.rs         GDI 捕获（安全桌面自检/降级/状态图）
-  sos_display.rs     显示器枚举与几何查询
-  sos_uac.rs         UAC 安全桌面 / 会话连接状态检测
-  ── 视频 ──
-  sos_video.rs       采集→编码→发送链路 + QoS 编排
-  sos_vpx.rs         libvpx 封装、编码格式决策、成本判定（纯函数可单测）
-  sos_qos.rs         按显示器的帧率/画质/码率状态机（纯逻辑可单测）
-  ── 网络 ──
-  sos_connection.rs  单连接生命周期（鉴权、消息泵、订阅）
-  sos_rendezvous.rs  信令（UDP 注册、打洞、中继）
-  sos_relay.rs       中继候选解析与优先级（纯函数可单测）
-  sos_file_transfer.rs  文件传输
-  sos_pipe.rs        命名管道（Main → System）
-  sos_shmem.rs       共享内存（帧数据通道）
-  ── 输入 ──
-  sos_input.rs       输入事件分派
+  lib.rs              库根：pub mod app/capture/video/net/ipc/input/ui + 缺 libvpx 时的 compile_error!
+  main.rs             二进制入口：GUI 子系统 + #[tokio::main] → app::run()
+  ── 启动 / 进程（app）──
+  app.rs              域根 + pub use run::run
+  app/run.rs          原 main 主体：CLI、模式分发、主进程装配
+  app/console.rs      调试控制台挂接（AttachConsole + CONOUT$ + SetStdHandle）
+  app/bootstrap.rs    提权检查、单实例、日志
+  app/config.rs       注册表配置、ID/密码
+  app/constants.rs    全局常量与 Windows 对象名
+  app/system.rs       SYSTEM 子进程入口与令牌提升
+  app/tray.rs         托盘
+  app/cpu.rs          CPU 占用采样（GetSystemTimes，不用 PDH）
+  app/watchdog.rs     SYSTEM 子进程看门狗（WaitForSingleObject + 指数退避）
+  app/secure_watch.rs 锁屏 / UAC 安全桌面监听线程（桌面切换 → SHMEM 采集切换）
+  ── 捕获（capture）──
+  capture.rs          域根 + SYSTEM 子进程的采集线程（写共享内存）
+  capture/dxgi.rs     DXGI Desktop Duplication 捕获
+  capture/gdi.rs      GDI 捕获（安全桌面自检/降级/状态图）
+  capture/display.rs  显示器枚举与几何查询
+  capture/uac.rs      UAC 安全桌面 / 会话连接状态检测
+  ── 视频（video）──
+  video.rs            域根：capture_loop（故意不拆）+ ActiveEncoder/CaptureState + 调优常量，
+                      并对五个子模块 pub use（保住 crate::video::xxx 调用点）
+  video/link.rs       链路档位与码率预算（LINK_TIER 迟滞、note_link_sample）
+  video/hub.rs        订阅表、广播、每显示器刷新/关键帧标志
+  video/ladder.rs     编码成本自适应与采集档位降级（MIN_TIER、ENC_LEVEL）
+  video/ability.rs    控制端编码能力与当前编码格式（PEER_ABILITY）
+  video/displays.rs   显示器枚举、命名缓存与切换消息
+  video/vpx.rs        libvpx 封装、编码格式决策、码率/预算纯函数（可单测）
+  video/hwenc.rs      硬件 H.264（hwcodec 的 FFmpeg 后端）
+  video/qos.rs        按显示器的帧率/画质/码率状态机（纯逻辑可单测）
+  ── 网络（net）──
+  net.rs              域根
+  net/connection.rs   单连接生命周期（鉴权、消息泵、订阅）
+  net/rendezvous.rs   信令（UDP 注册、打洞、中继）
+  net/relay.rs        中继候选解析与优先级；NAT 判定/中继决策纯函数（可单测）
+  net/rtt.rs          RTT min-filter（RttFilter 窗口与可信上限，可单测）
+  net/file_transfer.rs  文件传输
+  ── 进程间（ipc）──
+  ipc.rs              域根
+  ipc/pipe.rs         命名管道（Main → System）
+  ipc/shmem.rs        共享内存（帧数据通道）
+  ── 输入 / 界面 ──
+  input.rs            输入事件分派
+  ui.rs               域根
+  ui/consent.rs       本机「同意受控」弹窗
+  bindings/vpx_ffi.h  bindgen 的输入
 platform/windows.cc  SYSTEM 令牌提升、桌面切换钩子
 .cargo/config.toml  cargo 别名（xtask）
 xtask/              发布构建助手（编译 → 复制到 dist → UPX 压缩 → 校验）
 tools/              本机工具（不入库）：WMI 诊断脚本、可选的 UPX 副本
 dist/               交付物输出目录（不入库）
-tests/              编码/捕获/QoS/CPU 的实测与回归测试
+tests/              编码/捕获/QoS/CPU 的实测与回归测试（36 个测试二进制）
 ```
 
+模块名就是路径（`video::vpx`、`ipc::shmem`）。域根与目录**同名同级**（`video.rs` +
+`video/`），不是 `video/mod.rs`；`capture.rs` / `video.rs` / `input.rs` 这类域根本身也
+放实现，不是纯模块清单 —— 但 `video.rs` 现在只留 `capture_loop`（732 行，故意不拆）、
+`ActiveEncoder`/`CaptureState` 与全部调优常量，策略搬进了 `video/` 新增的五个子模块。
+域根里那组 `pub use ability::*; …` 是刻意保留的再导出，保证 `crate::video::xxx` 与测试
+调用点不变，**不要删**。集成测试不要再写指向 `../src/` 的 `#[path]`，理由见
+[`AGENTS.md`](AGENTS.md) §9。
+
 `libs/` 与仓库根 `src/`（上游 RustDesk）原则上不改，全部功能改动都在 `sos-client/` 内。
-现有 4 处不可避免的偏离（可解析性所需的 `Cargo.toml`/`Cargo.lock`、`.gitignore`、
-4 个模块的 `pub mod` 可见性、`vpxcodec.rs` 的基准参数）逐条列在
-[`AGENTS.md`](AGENTS.md) §1，**只减不增**。
+现有 3 处不可避免的偏离（可解析性所需的 `Cargo.toml`/`Cargo.lock`、`.gitignore`、
+4 个模块的 `pub mod` 可见性）逐条列在 [`AGENTS.md`](AGENTS.md) §1，**只减不增**。
+原本还有第 4 处（`libs/scrap/.../vpxcodec.rs` 的编码基准参数），已改成在测试侧用
+`video::vpx::set_rc_override` 控制，上游那行代码已还原 —— 基准要公平不需要动上游。
 
 改代码前请读 [`AGENTS.md`](AGENTS.md)：那里记录了上游依赖的现状（`hbb_common`/`base`
 拆分、`Stream: Drop`）、采集与码率控制的实测结论、以及一批「不要凭直觉改回去」的坑。
 仓库根的 `AGENTS.md` 属于上游，不要改它。
+
+### 清理 debug 产物（`target/debug` 实测峰值 148.8 GB）
+
+**一次干净构建就占 29 GB**，而 cargo **不回收**历史 hash 产物，重编几轮就翻几倍：
+
+| 量 | 实测值 |
+| --- | --- |
+| 一次完整构建（含 36 个测试二进制） | **29.1 GB**（deps 24.0 + incremental 3.0 + build 1.5），414 秒 |
+| 其中 `.pdb` | **73 个 / 约 24 GB** —— 每个测试二进制都链接了整个 `librustdesk` + WebRTC + FFmpeg 栈，单个 PDB 约 430 MB |
+| 最大的单个文件 | `librustdesk.lib` 3.1 GB（MSVC 的 import library 也带 debuginfo）、`liblibrustdesk.rlib` 1.1 GB |
+| 重构期间实测峰值 | **148.8 GB / 72336 个文件**：deps 93（pdb 72.6 + rlib 7.8 + exe 6.0 + lib 3.0）+ incremental 50.5（960 个会话目录，同一 crate 有几十个不同 hash）+ build 4.7 |
+| 折算 | ≈ **5 代产物**；同一个测试名有 **10 份**历史 PDB 副本 |
+
+根因两条，都不是 bug：
+
+1. **debuginfo 太大**：debug 构建带完整 DWARF，而本项目的依赖树是整个 rustdesk +
+   WebRTC + 静态 FFmpeg。每个测试二进制因此都有 ~430 MB 的 PDB。
+2. **cargo 只加不减**：`deps/` 与 `incremental/` 都按 hash 累积，旧产物只能靠 `cargo clean`
+   回收。改一次 `src/` 就会重链 36 个测试二进制（新一代 ~29 GB），大重构做几十轮就上百 GB。
+
+处理方式：
+
+- **日常**：大重构告一段落后跑一次，**只要 39 秒**就能删掉 debug 产物并保留 release：
+
+  ```powershell
+  cargo clean --profile dev --manifest-path d:\code\rustdesk\sos-client\Cargo.toml
+  ```
+
+  实测 `Removed 72336 files, 148.8GiB total` / 39s，磁盘剩余 168.7 → 308.7 GB。
+  代价是下一次 `cargo test` 要从零编译（实测 414 秒，`-j 4`）。
+- **想根治**就把 debuginfo 降级（本项目目前**没有**这么做，因为要牺牲变量级调试）：
+  `[profile.dev] debug = 1`（只保留行号表）。PDB 能小一个数量级，backtrace 仍有
+  `文件:行号`，但调试器里看不到变量值。是否值得由负责调试的人定。
+- 别用 `git clean -xdf` 代替：它会把 `dist/`（交付物）和 `tools/upx/`（UPX 缓存）一起删掉。

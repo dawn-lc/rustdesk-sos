@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<!--
+  只声明 Common-Controls 6.0.0.0，用来打开视觉样式（按钮/边框变现代样式）。
+
+  刻意**不加** dpiAware / supportedOS：
+  * dpiAware 会改变进程的 DPI 感知级别，进而影响屏幕坐标语义 —— 采集与输入注入
+    都依赖现有的「系统缩放感知」行为，改它风险太大；
+  * supportedOS 会改变 GetVersionEx 的返回值，可能影响上游对系统版本的判断。
+-->
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <assemblyIdentity type="win32" name="RustDesk.SOS" version="1.0.0.0" processorArchitecture="*"/>
+  <dependency>
+    <dependentAssembly>
+      <assemblyIdentity type="win32" name="Microsoft.Windows.Common-Controls" version="6.0.0.0" processorArchitecture="*" publicKeyToken="6595b64144ccf1df" language="*"/>
+    </dependentAssembly>
+  </dependency>
+</assembly>

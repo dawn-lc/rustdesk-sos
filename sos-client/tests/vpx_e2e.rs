@@ -7,8 +7,7 @@
 
 #![cfg(sos_vpx)]
 
-#[path = "../src/sos_vpx.rs"]
-mod sos_vpx;
+use rustdesk_sos::video::vpx as sos_vpx;
 
 use sos_vpx::{SosCodec, SosVpxConfig, SosVpxEncoder};
 use scrap::TraitCapturer;
@@ -48,6 +47,7 @@ fn capture_to_encode_pipeline() {
 
         let frames = 30u32;
         let mut ok = 0u32;
+        let mut captured = 0u32;
         let mut bytes = 0usize;
         let mut keyframes = 0u32;
         let start = Instant::now();
@@ -59,6 +59,7 @@ fn capture_to_encode_pipeline() {
                     continue;
                 }
             };
+            captured += 1;
             let data = match frame.to(yuvfmt.clone(), &mut yuv, &mut mid) {
                 Ok(input) => match input.yuv() {
                     Ok(d) => d.to_vec(),
@@ -91,6 +92,13 @@ fn capture_to_encode_pipeline() {
             ok as f64 / elapsed,
             bytes as f64 / ok.max(1) as f64 / 1024.0
         );
+        if captured == 0 {
+            // 一帧都没抓到：锁屏 / 会话断开 / DXGI 被上一个测试占着（每个输出只允许
+            // 一个 duplication）。这是环境问题，与「编码链路坏了」是两回事 ——
+            // 后者表现为**抓到了帧但编不出包**，下面的断言仍然会报。
+            println!("[skip] 本机当前抓不到屏幕帧（可能锁屏或被其他采集器占用）");
+            return;
+        }
         assert!(ok > 0, "no frame encoded for {codec:?}");
         assert!(bytes > 0, "no payload for {codec:?}");
     }

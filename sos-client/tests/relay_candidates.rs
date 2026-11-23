@@ -20,8 +20,8 @@
 
 // `sos_relay.rs` 刻意不依赖 crate 内任何模块（纯 std），
 // 因此可以按路径直接 include，测的就是生产代码本身而非副本。
-#[path = "../src/sos_relay.rs"]
-mod sos_relay;
+
+use rustdesk_sos::net::relay as sos_relay;
 
 use sos_relay::{relay_candidates, resolve_relay_candidates as resolve};
 

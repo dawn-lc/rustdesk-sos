@@ -21,11 +21,10 @@
 
 #![cfg(all(windows, sos_vpx))]
 
-#[path = "../src/sos_vpx.rs"]
-mod sos_vpx;
-
 #[path = "support/desktop.rs"]
 mod desktop;
+
+use rustdesk_sos::video::vpx as sos_vpx;
 
 use std::time::Instant;
 
@@ -106,6 +105,7 @@ fn measure(
 }
 
 #[test]
+#[ignore = "实机基准，默认不跑；cargo test -- --ignored 或 --test <name> -- --ignored"]
 fn vp9_screen_content_tuning() {
     println!();
     println!(

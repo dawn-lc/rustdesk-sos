@@ -25,11 +25,10 @@
 
 #![cfg(all(windows, sos_vpx))]
 
-#[path = "../src/sos_vpx.rs"]
-mod sos_vpx;
-
 #[path = "support/desktop.rs"]
 mod desktop;
+
+use rustdesk_sos::video::vpx as sos_vpx;
 
 use std::time::{Duration, Instant};
 
@@ -187,6 +186,7 @@ fn report(p: &Params, r: &Run) {
 
 /// 关键帧**密度**的代价：间隔从 150 缩短到 60 / 30。
 #[test]
+#[ignore = "实机基准（无断言，只打印表格）：需要时 -- --ignored"]
 fn keyframe_interval_cost() {
     println!();
     println!("══ 关键帧密度（VP9 {W}x{H} @ {KBPS}kbps, buf=200ms, overshoot=10, 不丢帧）══");
@@ -206,6 +206,7 @@ fn keyframe_interval_cost() {
 
 /// 关键帧**预算**：动哪个旋钮能让关键帧不被压质量。
 #[test]
+#[ignore = "实机基准（无断言，只打印表格）：需要时 -- --ignored"]
 fn keyframe_budget_knobs() {
     println!();
     println!("══ 关键帧预算（间隔固定 60 帧 = 2s）══");
@@ -238,6 +239,7 @@ fn keyframe_budget_knobs() {
 /// 上面两组各自单独看会漏掉交互：buffer 决定「一次关键帧能透支多少」，
 /// 间隔决定「多久透支一次」。两者必须一起选。
 #[test]
+#[ignore = "实机基准（无断言，只打印表格）：需要时 -- --ignored"]
 fn buffer_x_interval() {
     println!();
     println!("══ rc_buf_sz × 关键帧间隔 交叉验证（目标 {KBPS}kbps, over=10, 不丢帧）══");

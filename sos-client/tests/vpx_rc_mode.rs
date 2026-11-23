@@ -21,8 +21,7 @@
 
 #![cfg(all(windows, sos_vpx))]
 
-#[path = "../src/sos_vpx.rs"]
-mod sos_vpx;
+use rustdesk_sos::video::vpx as sos_vpx;
 
 use sos_vpx::{SosCodec, SosVpxConfig, SosVpxEncoder};
 use std::time::{Duration, Instant};
@@ -78,6 +77,9 @@ fn make_motion(w: usize, h: usize, seed: usize) -> Vec<u8> {
 }
 
 /// 中等复杂度：桌面滚动（局部内容移动）
+///
+/// 当前几组实验没有用到，保留作为可选场景。
+#[allow(dead_code)]
 fn make_scroll(w: usize, h: usize, seed: usize) -> Vec<u8> {
     let (cw, ch) = (w / 2, h / 2);
     let mut buf = vec![0u8; w * h + 2 * cw * ch];
@@ -246,6 +248,7 @@ where
 ///
 /// 预期：VBR 会把码率降到很低（因为内容简单），这是它的优势。
 #[test]
+#[ignore = "实机基准，默认不跑；cargo test -- --ignored 或 --test <name> -- --ignored"]
 fn static_content_vbr_is_cheaper() {
     let frames = 90usize;
     println!(
@@ -277,6 +280,7 @@ fn static_content_vbr_is_cheaper() {
 ///
 /// 预期：VBR 会显著超发 → 在中继链路上直接变成 RTT 上涨 → bufferbloat。
 #[test]
+#[ignore = "实机基准，默认不跑；cargo test -- --ignored 或 --test <name> -- --ignored"]
 fn motion_content_vbr_bursts() {
     let frames = 90usize;
     println!(
@@ -321,6 +325,7 @@ fn motion_content_vbr_bursts() {
 /// 如果某个模式在复杂段落冲破上限，ABR 会误判为「链路拥塞」而压帧率，
 /// 反而把画面搞卡。
 #[test]
+#[ignore = "实机基准，默认不跑；cargo test -- --ignored 或 --test <name> -- --ignored"]
 fn mixed_workload_shows_the_real_tradeoff() {
     let frames = 150usize; // 5 秒
     println!(
@@ -361,6 +366,7 @@ fn mixed_workload_shows_the_real_tradeoff() {
 /// 内网带宽充足、rtt=1ms，超发不会变成排队。
 /// 若这里 VBR 的丢帧率显著低于 CBR，就说明「按链路类型选模式」值得做。
 #[test]
+#[ignore = "实机基准，默认不跑；cargo test -- --ignored 或 --test <name> -- --ignored"]
 fn good_link_vbr_may_be_acceptable() {
     let frames = 90usize;
     println!("内网直连场景（thresh=0 不丢帧），高复杂度运动");
@@ -390,6 +396,7 @@ fn good_link_vbr_may_be_acceptable() {
 /// 所以必须回答：在**好链路（thresh=0）**下，VBR 相对 CBR 的超发是否可接受？
 /// 在差链路（thresh=20）下，VBR 是否仍然失控？
 #[test]
+#[ignore = "实机基准，默认不跑；cargo test -- --ignored 或 --test <name> -- --ignored"]
 fn mixed_workload_across_drop_policies() {
     let frames = 150usize;
     println!(

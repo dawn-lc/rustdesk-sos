@@ -5,8 +5,7 @@
 
 #![cfg(sos_vpx)]
 
-#[path = "../src/sos_vpx.rs"]
-mod sos_vpx;
+use rustdesk_sos::video::vpx as sos_vpx;
 
 use sos_vpx::{SosCodec, SosVpxConfig, SosVpxEncoder};
 use std::time::Instant;
@@ -69,6 +68,7 @@ fn bench(codec: SosCodec, w: u32, h: u32, threads: usize, frames: u32) {
 }
 
 #[test]
+#[ignore = "实机基准，默认不跑；cargo test -- --ignored 或 --test <name> -- --ignored"]
 fn sos_vpx_thread_scaling() {
     let frames = 40;
     for w_h in [(1920u32, 1080u32), (1280, 720)] {
@@ -84,6 +84,7 @@ fn sos_vpx_thread_scaling() {
 /// 运行自建编码器。结果应与 scrap 的 ~8.4fps 接近，以此证明实现等价，
 /// 从而说明后续 `cpu_used` / 线程数带来的提升是真实的，而不是实现差异。
 #[test]
+#[ignore = "实机基准，默认不跑；cargo test -- --ignored 或 --test <name> -- --ignored"]
 fn sos_vpx_matches_scrap_baseline() {
     let cfg = SosVpxConfig {
         width: 1920,
@@ -117,6 +118,7 @@ fn sos_vpx_matches_scrap_baseline() {
 /// `encode_to_message()`（encode + flush 每帧各一次）。
 /// 若帧率塌到个位数，即可确认「每帧 flush」是 1080p 低帧率的主因。
 #[test]
+#[ignore = "实机基准，默认不跑；cargo test -- --ignored 或 --test <name> -- --ignored"]
 fn sos_vpx_with_per_frame_flush() {
     let cfg = SosVpxConfig {
         width: 1920,

@@ -4,8 +4,7 @@
 
 #![cfg(windows)]
 
-#[path = "../src/sos_gdi.rs"]
-mod sos_gdi;
+use rustdesk_sos::capture::gdi as sos_gdi;
 
 use scrap::{TraitCapturer, TraitPixelBuffer};
 use std::time::{Duration, Instant};

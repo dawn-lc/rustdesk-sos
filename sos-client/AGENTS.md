@@ -13,8 +13,8 @@
 
 | 约束 | 说明 |
 | --- | --- |
-| **默认不改上游** | 新改动一律落在 `sos-client/`。需要上游行为改变时优先在 SOS 侧包一层或绕开（`sos_dxgi`/`sos_vpx`/`sos_cpu` 都是这么来的）。 |
-| **已存在的上游补丁，只减不增** | 现存 4 处，见下表。不要新增第 5 处；能让某处退场时优先退场。 |
+| **默认不改上游** | 新改动一律落在 `sos-client/`。需要上游行为改变时优先在 SOS 侧包一层或绕开（`capture::dxgi`/`video::vpx`/`app::cpu` 都是这么来的）。 |
+| **已存在的上游补丁，只减不增** | 现存 3 处，见下表。不要新增第 4 处；能让某处退场时优先退场。 |
 | **不钉第三方工具版本** | UPX 等外部工具禁止在源码里写死版本号或 sha256（见 §4）。 |
 | **生产代码禁 `unwrap()`/`expect()`** | 与根 `AGENTS.md` 一致；锁定中毒等例外同样适用。 |
 | **不跑 codegen** | 不要运行 `flutter_rust_bridge_codegen`；SOS 也不用 protobuf codegen（协议类型全部来自 `base` crate）。 |
@@ -26,13 +26,12 @@
 | `.gitignore` | 加 `/sos-client/target` | 独立项目有自己的 target |
 | `Cargo.toml` / `Cargo.lock` | `exclude` 加 `sos-client`；`tray-icon` 补 `rev` | 可解析性必需（见 §3） |
 | `src/lib.rs`、`src/server.rs` | 把 `server` / `clipboard` / `clipboard_service` / `service` 改成 `pub mod` | `sos-client` 直接调 `librustdesk::server::clipboard_service`、`librustdesk::clipboard`、`librustdesk::service` |
-| `libs/scrap/src/common/vpxcodec.rs` | `rc_dropframe_thresh = 0`、`rc_buf_sz = target*5` | **只被 `tests/enc_bench.rs` 用到**：它拿上游编码器做基线对比，必须关掉丢帧、放大缓冲，否则基线被丢帧水位污染（见 §7「编码器 A/B 必须控制丢帧水位」）。生产链路走自建 `sos_vpx`，不经过这里。 |
 
 已退场的补丁（留一行记录，防止有人照着旧资料又加回来）：
 
 | 文件 | 曾经的改动 | 退场原因 |
 | --- | --- | --- |
-| `src/server/video_service.rs` | `CUSTOM_CAPTURER_FACTORY` 静态注入点 + 3 个 `pub fn`（37 行纯新增） | SOS 全面改用 `sos_video` 自建链路后已无调用方，2026-11-18 整文件还原到上游版本。**不要重新引入**：要影响采集器请在 `sos_video` 侧自己建，不要再往 `libs/scrap` / `video_service` 里塞钩子。 |
+| `src/server/video_service.rs` | `CUSTOM_CAPTURER_FACTORY` 静态注入点 + 3 个 `pub fn`（37 行纯新增） | SOS 全面改用 `video` 自建链路后已无调用方，2026-11-18 整文件还原到上游版本。**不要重新引入**：要影响采集器请在 `capture` 侧自己建，不要再往 `libs/scrap` / `video_service` 里塞钩子。 |
 
 ---
 
@@ -43,53 +42,170 @@ sos-client/
 ├── Cargo.toml            独立项目（被根 workspace exclude），自带 Cargo.lock
 ├── Cargo.lock
 ├── build.rs              winres 图标/版本 · cc 编译 windows.cc · bindgen 生成 libvpx 绑定
+│                        （只有绑定生成成功才置 `cfg(sos_vpx)`；缺它时 `lib.rs` 的 `compile_error!` 报原因）
 ├── .cargo/config.toml    `cargo xtask` 别名 + 静态 CRT
 ├── .gitignore            dist/ · xtask/target/ · tools/
 ├── README.md             面向人的构建/运行说明
 ├── AGENTS.md             本文件
+├── res/sos.manifest      应用清单：只声明 Common-Controls 6（打开视觉样式）
 ├── platform/
 │   └── windows.cc        SetWinEventHook 桌面切换等待、run-as-system、切换桌面 FFI
-├── src/                  全部平铺 + `sos_` 前缀（见下）
+├── src/
+│   ├── lib.rs            库根：`pub mod` 七个域；缺 libvpx 时这里的 `compile_error!` 说明原因
+│   ├── main.rs           二进制入口（14 行）：GUI 子系统属性 + `#[tokio::main]` → `app::run()`
+│   ├── app.rs            进程生命周期域根（域根与目录同名同级，不用 `xxx/mod.rs`）
+│   ├── app/
+│   │   ├── run.rs        原 `main.rs` 主体：CLI、模式分发、主进程装配（控制台 / 看门狗 / 安全桌面监听已拆出）
+│   │   ├── console.rs    调试控制台挂接：AttachConsole + CreateFile("CONOUT$") + SetStdHandle，`setup(debug, service)`
+│   │   ├── bootstrap.rs  日志初始化（主进程 / SYSTEM 各一套文件）、单实例互斥体
+│   │   ├── config.rs     注册表配置 + CLI 合并
+│   │   ├── constants.rs  全局常量、`Global\` 事件名、`VERSION`
+│   │   ├── system.rs     SYSTEM 子进程启动与服务循环
+│   │   ├── tray.rs       托盘图标与菜单
+│   │   ├── cpu.rs        `GetSystemTimes` CPU 采样
+│   │   ├── watchdog.rs   SYSTEM 子进程存活看门狗：WaitForSingleObject 事件驱动 + 启动期失败指数退避（`SUBPROC_*` 常量在此）
+│   │   └── secure_watch.rs 安全桌面（锁屏 / UAC）监听线程，`UAC_FALLBACK_POLL_INTERVAL` / `SECURE_READY_WAIT_MS` / `SECURE_POLL_INTERVAL_MS` 随迁至此
+│   ├── capture.rs        采集域根 + SYSTEM 子进程采集线程（安全桌面经 GDI 抓屏写 SHMEM）
+│   ├── capture/
+│   │   ├── dxgi.rs       自建 DXGI Desktop Duplication 采集器
+│   │   ├── gdi.rs        自建 GDI 采集器（自检 / 逐档降级 / 变化检测 / 状态图）
+│   │   ├── display.rs    显示器枚举与按名查尺寸
+│   │   └── uac.rs        安全桌面判定、会话连接状态
+│   ├── video.rs          视频域根：`Sender` / `VideoSender` 类型别名、全部调优常量、`start` / `ensure_pipeline`、
+│   │                     `capture_loop`（732 行，**故意不拆**）、`create_capturer` / `classify_frame_error` /
+│   │                     `demote_capturer`、`ActiveEncoder`、`CaptureState`、`mod tests`；
+│   │                     另有 `pub use ability::*; displays::*; hub::*; ladder::*; link::*;`（刻意的再导出，见下）
+│   ├── video/
+│   │   ├── link.rs       链路档位与码率预算（`LINK_TIER` 迟滞状态机、`note_link_sample`、`link_budget`、
+│   │   │                 `dropframe_thresh_for_link`）
+│   │   ├── hub.rs        订阅表、广播与每显示器控制标志（`Subscriber` / `SUBSCRIBERS`、`subscribe` / `unsubscribe`、
+│   │   │                 `send_video` / `broadcast_video`、`REFRESH_MASK` / `KEYFRAME_MASK`、`request_refresh` / `request_keyframe`）
+│   │   ├── ladder.rs     编码成本自适应与采集档位降级（`MIN_TIER`、`ENC_LEVEL` / `ENC_BASELINE_MS` / `VP8_REJECTED`、
+│   │   │                 `capture_spf`、`step_down_encoder`、`revert_vp8_if_useless`、`is_no_display_error`）
+│   │   ├── ability.rs    控制端编码能力与当前编码格式（`PEER_ABILITY`、`set_hw_unavailable` / `hw_available`、
+│   │   │                 `set_peer_codec_ability`、`current_codec` / `describe` / `codec_name`）
+│   │   ├── displays.rs   显示器枚举、命名与切换消息（`display_info` / `list_displays` / `set_display_name` /
+│   │   │                 `cached_display_name` / `make_switch_display_msg` / `is_remote_session`）
+│   │   ├── vpx.rs        自建 libvpx 编码器 + 码率/链路档位/降级策略（纯函数集中在这里）
+│   │   ├── hwenc.rs      硬件 H.264 编码器（`hwcodec` 的 FFmpeg 后端，吃 CPU 的 NV12）
+│   │   └── qos.rs        RTT / 帧率 / 码率 / 画质比，按显示器聚合
+│   ├── net.rs            网络域根
+│   ├── net/
+│   │   ├── connection.rs 会话主循环、能力协商、消息分派、`Conn` 拆半区
+│   │   ├── rendezvous.rs 信令服务器交互（注册、PunchHole、RequestRelay）
+│   │   ├── relay.rs      中继地址解析、多候选挑选；另有两个纯函数 `classify_nat` / `must_relay`
+│   │   ├── rtt.rs        RTT 采样 min-filter：`RttFilter` + `RTT_WINDOW` + `MAX_TRUSTED_RTT_MS`
+│   │   └── file_transfer.rs 文件传输作业管理
+│   ├── ipc.rs            IPC 域根
+│   ├── ipc/
+│   │   ├── pipe.rs       命名管道（主进程 ↔ SYSTEM 子进程）
+│   │   └── shmem.rs      共享内存帧通道
+│   ├── input.rs          远程鼠标/键盘注入（单文件，无子模块）
+│   ├── ui.rs             本机用户界面域根
+│   ├── ui/
+│   │   └── consent.rs    连接确认弹窗
 │   └── bindings/
 │       └── vpx_ffi.h     bindgen 的输入，只声明用到的 libvpx 符号
-├── tests/                35 个集成测试二进制；support/ 是共用内容生成器（非测试目标）
+├── tests/                36 个集成测试二进制；support/ 是共用内容生成器（非测试目标）
+├── vcpkg/ffmpeg/         FFmpeg overlay port（官方 7.1.2 + 上游两个 AMF 补丁）
+├── vendor/hwcodec/       hwcodec 本地副本（只改「调优项失败」不再致命）
 ├── xtask/                发布构建工具，自带 `[workspace]`，零依赖
 ├── tools/                【不入库】UPX 缓存 + 一次性现场诊断脚本
 ├── dist/                 【不入库】交付物（UPX 压缩后）
 └── target/               【不入库】cargo 原生产物
 ```
 
-### `src/` 为什么是平铺的
+### `src/` 为什么现在分层
 
-`tests/*.rs` 用 `#[path = "../src/sos_xxx.rs"] mod sos_xxx;` 单独复用某个源文件做
-单测（测试里的 `crate::sos_xxx` 因此也能解析）。**移动文件会连带改 30+ 个测试的
-`#[path]`**，所以只在 `main.rs` 顶部维护「模块地图」做逻辑分组，不动文件位置。
+旧结构是「全部平铺 + `sos_` 前缀」，唯一的理由是**测试要复用源文件**：那时没有库
+目标，`tests/*.rs` 只能用 `#[path = "../src/sos_xxx.rs"] mod sos_xxx;` 把某个源文件
+重新编译进自己的二进制（测试里的 `crate::sos_xxx` 因此也能解析）。文件一移动就要
+连带改 30+ 个 `#[path]`，所以只在 `main.rs` 顶部维护一张「模块地图」做逻辑分组，
+不动文件位置。
 
-### 模块地图（与 `main.rs` 顶部一致）
+**现在有了 `src/lib.rs`，这个理由消失了**：测试改成 `use rustdesk_sos::video::vpx as
+sos_vpx;`，直接链接库，于是按域分层：
 
-| 分组 | 模块 | 职责 |
-| --- | --- | --- |
-| 启动/进程 | `sos_bootstrap` | 日志初始化（主进程 / SYSTEM 子进程各一套文件）、单实例互斥体 |
-| | `sos_config` | 注册表配置（`HKLM\SOFTWARE\RustDeskSOS\`）+ CLI 合并 |
-| | `sos_constants` | 全局常量、`Global\` 内核对象名、`VERSION` |
-| | `sos_system` | SYSTEM 子进程启动与服务循环 |
-| | `sos_tray` | 托盘图标与菜单 |
-| | `sos_cpu` | `GetSystemTimes` CPU 采样（替代上游 PDH） |
-| 捕获 | `sos_capture` | SYSTEM 子进程采集线程（写 SHMEM），安全桌面图像降级 |
-| | `sos_dxgi` | 自建 DXGI Desktop Duplication 采集器 |
-| | `sos_gdi` | 自建 GDI 采集器（自检 / 逐档降级 / 变化检测 / 状态图） |
-| | `sos_display` | 显示器枚举与按名查尺寸 |
-| | `sos_uac` | 安全桌面判定、会话连接状态 |
-| 视频 | `sos_video` | 每显示器的采集→转换→编码→发送循环 |
-| | `sos_vpx` | 自建 libvpx 编码器 + 码率/链路档位/降级策略（纯函数集中在这里，便于单测） |
-| | `sos_qos` | RTT / 帧率 / 码率 / 画质比，按显示器聚合 |
-| 网络 | `sos_connection` | 会话主循环、能力协商、消息分派、`Conn` 拆半区 |
-| | `sos_rendezvous` | 信令服务器交互（注册、PunchHole、RequestRelay） |
-| | `sos_relay` | 中继地址解析与多候选挑选 |
-| | `sos_file_transfer` | 文件传输作业管理 |
-| | `sos_pipe` | 命名管道（主进程 ↔ SYSTEM 子进程） |
-| | `sos_shmem` | 共享内存帧通道 |
-| 输入 | `sos_input` | 远程鼠标/键盘注入 |
+| 变化 | 为什么 |
+| --- | --- |
+| 每个域一个 `xxx.rs` 域根 + 同名 `xxx/` 目录 | 模块路径本身就是分组（`video::vpx`），不再靠 `main.rs` 顶部的注释维护地图 |
+| 测试走库（`use rustdesk_sos::…`） | 源文件只编一遍；测试拿不到 `pub(crate)`，等于顺手锁死「测试只依赖公开面」 |
+| 模块可见性统一 `pub` | 集成测试在 crate 外，`pub(crate)` 对它不可见 |
+
+两条约束是这次分层的直接后果，改目录前先看：
+
+- **域根与目录必须同名同级**（`app.rs` + `app/`），不要改回 `app/mod.rs`。
+- **域根本身也放实现，但只放「循环与状态」**：`capture.rs` 是 SYSTEM 采集线程；
+  `video.rs` 现在只留 `capture_loop`（732 行，**故意不拆**）、`ActiveEncoder` /
+  `CaptureState`、`create_capturer` / `classify_frame_error` / `demote_capturer`、
+  两个通道类型别名与全部调优常量 —— 策略已经搬进 `video/` 里新增的 5 个子模块；
+  `input.rs` 是全部输入逻辑。只有 `net.rs` / `ipc.rs` / `ui.rs` / `app.rs` 基本是
+  `pub mod` 清单。不要把域根掏空成纯清单再给实现单开一个 `mod.rs`。
+- **`video.rs` 顶部那组 `pub use` 是刻意的调用点契约**：
+  `pub use ability::*;` / `pub use displays::*;` / `pub use hub::*;` /
+  `pub use ladder::*;` / `pub use link::*;` —— 让 `crate::video::xxx` 与本 crate 外
+  测试里的 `rustdesk_sos::video::xxx` 全部不用改。**不要删这组再导出**，也不必把
+  调用点改成 `video::link::xxx`：拆文件的目的是让模块边界清晰，不是重新命名 API。
+
+### 模块地图（与 `src/lib.rs` 顶部一致）
+
+模块名就是路径：原来的 `sos_vpx` 现在是 `video::vpx`，`sos_pipe` 是 `ipc::pipe`。
+
+| 分组 | 模块 | 位置 | 职责 |
+| --- | --- | --- | --- |
+| 启动/进程 | `app` | `src/app.rs` | 域根 + `pub use run::run`；入口 `app::run()`（`mod run` 私有） |
+| | `app::run` | `src/app/run.rs` | 原 `main.rs` 主体：CLI 解析、模式分发、主进程装配（控制台 / 看门狗 / 安全桌面监听已拆出） |
+| | `app::console` | `src/app/console.rs` | 调试控制台挂接：`AttachConsole` + `CreateFile("CONOUT$")` + `SetStdHandle`，签名 `setup(debug, service)` |
+| | `app::watchdog` | `src/app/watchdog.rs` | SYSTEM 子进程存活看门狗：`WaitForSingleObject` 事件驱动 + 启动期失败指数退避（`SUBPROC_*` 常量随迁） |
+| | `app::secure_watch` | `src/app/secure_watch.rs` | 安全桌面（锁屏 / UAC）监听线程，`spawn(capture_start_event, capture_stop_event)`（三个轮询/等待常量随迁） |
+| | `app::bootstrap` | `src/app/bootstrap.rs` | 日志初始化（主进程 / SYSTEM 子进程各一套文件）、单实例互斥体 |
+| | `app::config` | `src/app/config.rs` | 注册表配置（`HKLM\SOFTWARE\RustDeskSOS\`）+ CLI 合并 |
+| | `app::constants` | `src/app/constants.rs` | 全局常量、`Global\` 内核对象名、`VERSION` |
+| | `app::system` | `src/app/system.rs` | SYSTEM 子进程启动与服务循环 |
+| | `app::tray` | `src/app/tray.rs` | 托盘图标与菜单 |
+| | `app::cpu` | `src/app/cpu.rs` | `GetSystemTimes` CPU 采样（替代上游 PDH） |
+| 捕获 | `capture` | `src/capture.rs` | SYSTEM 子进程采集线程（写 SHMEM），安全桌面图像降级 |
+| | `capture::dxgi` | `src/capture/dxgi.rs` | 自建 DXGI Desktop Duplication 采集器 |
+| | `capture::gdi` | `src/capture/gdi.rs` | 自建 GDI 采集器（自检 / 逐档降级 / 变化检测 / 状态图） |
+| | `capture::display` | `src/capture/display.rs` | 显示器枚举与按名查尺寸 |
+| | `capture::uac` | `src/capture/uac.rs` | 安全桌面判定、会话连接状态 |
+| 视频 | `video` | `src/video.rs` | 域根：`capture_loop`（732 行，故意不拆）、`ActiveEncoder` / `CaptureState`、全部调优常量；`pub use` 五个子模块 |
+| | `video::link` | `src/video/link.rs` | 链路档位与码率预算：`LINK_TIER` 迟滞状态机、`note_link_sample`、`link_budget`、`dropframe_thresh_for_link` |
+| | `video::hub` | `src/video/hub.rs` | 订阅表、广播与每显示器控制标志：`Subscriber` / `SUBSCRIBERS`、`subscribe` / `unsubscribe`、`send_video` / `broadcast_video`、`REFRESH_MASK` / `KEYFRAME_MASK` |
+| | `video::ladder` | `src/video/ladder.rs` | 编码成本自适应与采集档位降级：`MIN_TIER`、`ENC_LEVEL` / `ENC_BASELINE_MS` / `VP8_REJECTED`、`capture_spf`、`step_down_encoder`、`revert_vp8_if_useless`、`is_no_display_error` |
+| | `video::ability` | `src/video/ability.rs` | 控制端编码能力与当前编码格式：`PEER_ABILITY`、`set_hw_unavailable` / `hw_available`、`set_peer_codec_ability`、`current_codec` / `describe` / `codec_name` |
+| | `video::displays` | `src/video/displays.rs` | 显示器枚举、命名与切换消息：`display_info` / `list_displays` / `set_display_name` / `cached_display_name` / `make_switch_display_msg` / `is_remote_session` |
+| | `video::vpx` | `src/video/vpx.rs` | 自建 libvpx 编码器 + 码率/链路档位/降级策略（纯函数集中在这里，便于单测） |
+| | `video::hwenc` | `src/video/hwenc.rs` | 硬件 H.264 编码器（`hwcodec` 的 FFmpeg 后端：nvenc/qsv/amf，吃 CPU 的 NV12） |
+| | `video::qos` | `src/video/qos.rs` | RTT / 帧率 / 码率 / 画质比，按显示器聚合 |
+| 网络 | `net::connection` | `src/net/connection.rs` | 会话主循环、能力协商、消息分派、`Conn` 拆半区 |
+| | `net::rendezvous` | `src/net/rendezvous.rs` | 信令服务器交互（注册、PunchHole、RequestRelay） |
+| | `net::relay` | `src/net/relay.rs` | 中继地址解析与多候选挑选；NAT 判定/中继决策提成纯函数 `classify_nat` / `must_relay`（`net::rendezvous` 调用，测试直接打） |
+| | `net::rtt` | `src/net/rtt.rs` | RTT 采样 min-filter：`RttFilter` + `RTT_WINDOW`(5) + `MAX_TRUSTED_RTT_MS`；`Session` 持有一个实例而不是 `VecDeque` |
+| | `net::file_transfer` | `src/net/file_transfer.rs` | 文件传输作业管理 |
+| IPC | `ipc::pipe` | `src/ipc/pipe.rs` | 命名管道（主进程 ↔ SYSTEM 子进程） |
+| | `ipc::shmem` | `src/ipc/shmem.rs` | 共享内存帧通道 |
+| 输入 | `input` | `src/input.rs` | 远程鼠标/键盘注入（单文件，无子模块） |
+| 界面 | `ui::consent` | `src/ui/consent.rs` | 连接确认弹窗（Win32 置顶窗口，默认启用；锁屏/UAC 时由调用方跳过） |
+
+依赖方向**不是**严格单向，按实际调用统计是这样（与 `src/lib.rs` 顶部注释一致）：
+
+- `app` 是装配层，依赖其余全部六个域；
+- `net` → `video` 约 30 处（`subscribe`/`unsubscribe`、`qos::with`、`request_keyframe`、
+  `set_peer_codec_ability`、`display_info`、`cached_display_name` 等），
+  `video` → `capture` 9 处，`net` → `capture` 5 处（`uac::*`、`display::primary_size`）；
+- `capture` → `ipc`（写帧）；`ipc` 与 `ui` **没有出边**。
+
+这轮拆出的子模块没有改变上面这张图：`video/*` 仍在 `video` 域内部调用，`net::rtt`
+只被 `net::connection` 使用，`net::relay` 的两个纯函数只被 `net::rendezvous` 调用。
+
+**`ipc` 必须保持零出边。** 它只提供「命名共享内存原语」，至于帧缓冲区要多大由调用方
+算好传进来：`ipc::shmem::create_shmem(fallback)` 收一个回退尺寸参数，由
+`app::run` 传 `capture::display::primary_size()`。曾经这里是 `create_shmem()` 自己就地
+调 `capture::display::primary_size()`，于是 `ipc ↔ capture` 成了整个 crate 唯一的双向环；
+改成参数传入后就断开了。**以后别再让 `ipc` 回头查采集/会话状态** —— 真需要就加参数。
+
+改跨域调用时按这个真实图判断，不要按「底座只经 ipc 解耦」的设想去找依赖。
 
 ---
 
@@ -113,7 +229,7 @@ sos-client/
 3. **测试必须带绝对 `--manifest-path`，且不要先 `cd`。**
    `cargo test --manifest-path d:\code\rustdesk\sos-client\Cargo.toml`。
    `Set-Location`/`cd` 会被某些工具链**静默剥掉**，于是 `--manifest-path Cargo.toml`
-   解析成仓库根的清单 —— 跑的是上游 `rustdesk` 的 225 个单测，而不是 SOS 的 35 个
+   解析成仓库根的清单 —— 跑的是上游 `rustdesk` 的 225 个单测，而不是 SOS 的 36 个
    测试二进制。判据：输出里的 `Running` 行应是 `target\debug\deps\` 下带
    `rustdesk_sos` / `vpx_*` / `qos_*` 等名字，且 target 目录是 `sos-client\target`。
 
@@ -148,7 +264,13 @@ sos-client/
 `rust-analyzer analysis-stats` 实测：`Database loaded 9.7s / 2.6GB`、
 `Item Tree Collection 57s / 11.8GB`、依赖 2856 万行 —— SOS 经
 `rustdesk = { path = ".." }` 依赖整个根 crate，**很重是正常的**，不是卡住。
-`sos-client/target` 曾达 44GB，已放进 `files.watcherExclude`。
+`sos-client/target` 已放进 `files.watcherExclude`。
+
+### `target/debug` 会疯涨（实测峰值 148.8 GB）
+
+一次完整构建（含 36 个测试二进制）就 **29.1 GB**，cargo 还不回收历史 hash 产物，
+大重构做几十轮就过百 GB。清理命令、成因分析与防复发选项见
+[`README.md`](README.md)「清理 debug 产物」一节。
 
 ---
 
@@ -204,7 +326,7 @@ sos-client/
 - **WebRTC 被链进二进制**：`Stream` 的一个变体，`drop` 会分发到 `close_webrtc()`，
   链接器无法裁剪整条栈（产物里 200+ 处 WebRTC 串）。SOS 不走 WebRTC，但这段不是
   死代码，改 SOS 去不掉。产物因此从 8.75 MB 涨到 13.57 MB（压缩前）。
-- **版本号故意保持 `1.4.9`**（上游已 1.5.3）：`sos_constants::VERSION` 会作为
+- **版本号故意保持 `1.4.9`**（上游已 1.5.3）：`app::constants::VERSION` 会作为
   `PeerInfo.version` 上报并驱动控制端特性开关，报 1.5.x 会让控制端尝试 sos 未
   实现的 WebRTC 传输。改之前先确认协议面已对齐。
 - `libs/hbb_common` 是 git submodule，不要在父仓库里直接改它的内容。
@@ -218,9 +340,9 @@ sos-client/
 主进程（用户权限，托盘 + 网络 + 全部服务）用 winlogon 令牌把自身以 SYSTEM 身份再
 拉起一份 `--service` 实例，后者只负责在安全桌面出现时往共享内存写帧。
 
-- 帧数据走 SHMEM（`sos_shmem`），控制信令走命名管道（`sos_pipe`）。
-- **跨会话必须用 `Global\` 内核对象**：`sos_constants` 的事件名带 `Global\` 前缀，
-  `sos_shmem::os_id()` 生成 `Global\RustDeskSOS_{name}`，`scoped_name()` 统一取值。
+- 帧数据走 SHMEM（`ipc::shmem`），控制信令走命名管道（`ipc::pipe`）。
+- **跨会话必须用 `Global\` 内核对象**：`app::constants` 的事件名带 `Global\` 前缀，
+  `ipc::shmem` 的私有 `os_id()` 生成 `Global\RustDeskSOS_{name}`，`scoped_name()` 统一取值。
   创建方需**显式启用** `SeCreateGlobalPrivilege`（管理员令牌持有但默认禁用，且
   `AdjustTokenPrivileges` 部分授予也返回成功，必须再查 `GetLastError()==1300`）。
 - `create()` 失败会回退会话内命名，此时主进程按 `uses_global_namespace()` 给子进程
@@ -228,16 +350,16 @@ sos-client/
 
 ### 自建视频链路
 
-不使用上游 `video_service`，链路是：`sos_video` 的采集线程 →
-`Frame::to(yuvfmt)` → `sos_vpx::SosVpxEncoder` → `Conn::send`。
+不使用上游 `video_service`，链路是：`video` 的采集线程 →
+`Frame::to(yuvfmt)` → `video::vpx::SosVpxEncoder` → `Conn::send`。
 
 - 只**读取**上游的少量公开 API（`make_display_changed_msg`、`VideoSource`、
   `restore_resolutions` 等），**不改**它的实现。早期曾在
   `src/server/video_service.rs` 里塞过 `CUSTOM_CAPTURER_FACTORY` 注入点，已随
   自建链路成熟而退场（见 §1 的退场记录）——**该文件现在与上游完全一致**。
-- `#[cfg(not(sos_vpx))]` 的「回退上游 video_service」分支**编译不过**（`sos_connection`
-  无条件引用 `sos_video`/`sos_vpx`），已换成 `compile_error!`。缺 libvpx 时构建
-  直接给出明确原因，不要复活那条分支。
+- `#[cfg(not(sos_vpx))]` 的「回退上游 video_service」分支**编译不过**（`net::connection`
+  无条件引用 `video` 的 `vpx`/`hwenc`/`qos` 子模块），已换成 `src/lib.rs` 里的
+  `compile_error!`。缺 libvpx 时构建直接给出明确原因，不要复活那条分支。
 - `g_lag_in_frames = 0` 是硬要求：VP9 默认 25 帧前瞻，不设 0 则 `encode` 成功但
   `get_cx_data` 取不到包（实测 0 输出）。上游正是靠每帧 `flush()` 强逼，代价是
   丢掉帧间优化（单帧耗时翻 2.15 倍、码率暴增）。
@@ -255,9 +377,12 @@ sos-client/
 `classify_frame_error()`：WouldBlock / TimedOut / Interrupted = 正常无新帧；
 ConnectionRefused = 降档；其余 = 重建（连续 5 次才降档）。
 
+（实现位置：`MIN_TIER` / `capture_spf` 在 `video::ladder`；`create_capturer` /
+`classify_frame_error` / `demote_capturer` 与 `MAX_REBUILD_BACKOFF` 仍在 `video.rs` 域根。）
+
 ### QoS
 
-`sos_qos` 替代上游全局标量 `VIDEO_QOS`，按显示器聚合多连接：
+`video::qos` 替代上游全局标量 `VIDEO_QOS`，按显示器聚合多连接：
 
 | 量 | 规则 | 理由 |
 | --- | --- | --- |
@@ -279,7 +404,7 @@ ConnectionRefused = 降档；其余 = 重建（连续 5 次才降档）。
 
 - **`scrap` 的 DXGI 实现有两个致命 bug**（`unmap()` 顺序颠倒、提前 return 不释放
   frame），fastlane 下会让 `MapDesktopSurface` 永久返回 `DXGI_ERROR_INVALID_CALL`
-  且重建也救不回。所以有自建 `sos_dxgi`（实测连续 300 次采集 0 个 InvalidData）。
+  且重建也救不回。所以有自建 `capture::dxgi`（实测连续 300 次采集 0 个 InvalidData）。
 - **`scrap` 把 `DXGI_ERROR_WAIT_TIMEOUT` 映射为 `ErrorKind::TimedOut`**，不是
   `WouldBlock`。只白名单 `WouldBlock` 会把「手静止桌面」误判成「DXGI 不可用」。
 - `scrap::Display` 既不 `Clone` 也不能共享（`Capturer::new` 取所有权），需要两份时
@@ -290,7 +415,7 @@ ConnectionRefused = 降档；其余 = 重建（连续 5 次才降档）。
   下两者差 1.25 倍，用错会恒定判「分辨率变了」→ 每秒重建一次编码器。
   `tests/display_select.rs` 锁死这条。
 - **安全桌面上 `Display::all()` 必然为空**（`EnumDisplayDevicesW` 在 Winlogon 桌面
-  拿不到设备），必须有**不依赖枚举**的回退：`sos_gdi::primary()` =
+  拿不到设备），必须有**不依赖枚举**的回退：`capture::gdi::primary()` =
   `CreateDCW(L"DISPLAY")` 与 `GetDC(NULL)`，尺寸用 `GetDeviceCaps(HORZRES/VERTRES)`。
 - **「建得出 DC」≠「抄得动像素」**：安全桌面上 `CreateDCW` 成功但 `BitBlt` 连续被拒
   (`E_ACCESSDENIED`)。所以自检要实测且多轮，采集方式要能逐档降级
@@ -309,6 +434,46 @@ ConnectionRefused = 降档；其余 = 重建（连续 5 次才降档）。
   `scrap` 原版还额外做 GetDIBits + 全帧镜像 + 全帧旋转 + 每帧 8MB 分配 + 8MB memcmp，
   自建 DIB 直写全部省掉。
 
+### 硬件编码（H.264）
+
+- **`hwcodec` 是默认 feature**（`sos-client/Cargo.toml` 的 `default = ["hwcodec"]`）：
+  普通 `cargo xtask` 出的就是带硬件编码的版本，产物约 29.4 MB（压缩前）/ 7~8 MB（UPX）。
+  要回到纯软件、不依赖 FFmpeg 静态库的小体积版本用 `--no-default-features`（13.6 MB）。
+  关闭时 `video::hwenc` 走一个**同 API 的桩**，所以上层（`video`/`net::connection`）
+  两种配置下是同一份代码，不需要 `#[cfg]`。
+- **上游的硬件编码只出 H.264/H.265，没有 VP8/VP9**（`hwcodec` 的 `available_encoders` 只枚举
+  h264/hevc）。所以这不是「换个后端函数」，而是**换编码格式**：`SosCodec`/`CodecPrefer`/
+  `choose_codec`/`make_video_msg`/能力声明全都要一起动。
+- 走的是 **RAM 路径**（`hwcodec::ffmpeg_ram::encode::Encoder`，吃 CPU 的 NV12），不是 D3D11 纹理直通。想零拷贝必须
+  让采集器产出 `Frame::Texture` + `set_output_texture` + `input_texture()==true`，而
+  `capture::dxgi`/`capture::gdi`/`ipc::shmem` 三个采集器**只产出 CPU 的 `PixelBuffer(BGRA)`**，
+  且上游明令「GDI 采集 + VRAM 编码」互斥（`video_service.rs:789-794` 直接 `bail!`）——
+  而 GDI 正是 SOS 锁屏/RDP 场景的唯一路径。所以纹理直通在 SOS 里没有价值。
+- **FFmpeg 是静态链接进产物的，目标机不需要装任何东西**：`hwcodec/build.rs` 从
+  `$VCPKG_ROOT/installed/<triplet>/lib` 取 `avcodec/avutil/avformat` 并以静态库链接，
+  再 `cc` 编它的 C++ 外壳。所以「需要 vcpkg」只是**构建期**约束，不是部署期依赖。
+  那份静态库由 **`sos-client/vcpkg/ffmpeg/`**（本项目自己的 overlay port）装出来，
+  它 = vcpkg 官方 7.1.2 端口 + 上游那两个 AMF 补丁。**不能改用仓库的 `res/vcpkg`
+  overlay**：那个端口 `--disable-swresample`，而 hwcodec 的 `dec.o`（opus 解码）
+  需要 `swr_*`，会 LNK2019。装法见 README（构建前置步骤）。
+  注意 hwcodec 写死的是 `VCPKG_ROOT/installed`（classic 模式的全局安装目录），
+  **不是**仓库里的 `vcpkg_installed`（manifest 模式）—— 上游 CI 用
+  `lukka/run-vcpkg` 装的正是前者。
+- **`yuvfmt()` 必须用编码器自己给的那份**：硬件要 NV12 且 stride 由 ffmpeg 决定，
+  不能沿用 `video::vpx` 里 `calc_yuvfmt` 那套「用假指针让 libvpx 反解布局」的做法。
+- **探测结论必须自己缓存**（`video::hwenc` 的 `STATE`）。`Encoder::available_encoders` 会
+  **真的逐個建编码器并试编一帧**（实测 2.3s），不缓存就等于每隔几秒重探一次。
+  `available()` 会被 `[VID_FPS]` 这类周期性日志间接调用，所以必须走原子量。
+- 探测放**后台线程**（`probe_async`），不用上游的子进程模式：上游要 `--check-hwcodec-config`
+  子命令，而 SOS 的 clap 会拒绝未知参数，启动路径上还有管理员检查 + 单实例互斥体。
+  探测完成前 `available()` 恒 false ⇒ 一律走 VP9，功能不受影响。
+- 选码时**不看 `ENC_LEVEL`**：那套阶梯是按「软件编码吃 CPU」标定的。
+  反过来 `encoder_behind_budget` 的第一个条件 `enc > cap` 在硬件上**永远不成立**
+  （提交耗时 <1ms，`cap` 约 5ms），所以降级阶梯对硬件后端天然空转 —— 这是设计，不是 bug。
+- 能力声明的门控：`encoding.h264 = hw_available()`。声明了却没有实现，控制端会显示
+  H.264 选项、用户选了却仍旧收到 VP9 码流；而 `prefer=H264` 在软件规则里会被当 `Auto`。
+- 硬件初始化失败要**回退软件编码**（`set_hw_unavailable()` + 用 VP9 重建），
+  不能让整条管线失败。
 ### 码率控制（libvpx）
 
 - **`rc_buf_sz` / `rc_buf_initial_sz` / `rc_buf_optimal_sz` 单位是毫秒，不是比特。**
@@ -352,7 +517,7 @@ ConnectionRefused = 降档；其余 = 重建（连续 5 次才降档）。
 - 缩放下限是 `MIN_FPS_FACTOR = 0.5`。更小会塌缩到 318kbps，1080p 编不出来只能疯狂
   丢帧，而且掩盖了「采集侧永不低于 `MIN_CAPTURE_FPS = 8`」的事实 ⇒ 1Hz 循环里传的是
   `max(qos_fps, MIN_CAPTURE_FPS)`。
-- `sos_qos` 的 `DEFAULT_FPS` 是 30（不是上游 `VIDEO_QOS` 的初始 15），所以启动即满速，
+- `video::qos` 的 `DEFAULT_FPS` 是 30（不是上游 `VIDEO_QOS` 的初始 15），所以启动即满速，
   不存在「预热期按 15fps 算码率 → 837kbps → 82% 丢帧」那个坑。**改初始值前先想清楚这一点。**
 - 变更判定用「码率相对变化 > 8%」而不是「画质比变化 > 0.05」，因为帧率变化也会改码率。
 
@@ -361,6 +526,8 @@ ConnectionRefused = 降档；其余 = 重建（连续 5 次才降档）。
 - **延迟样本必须做窗口最小值滤波（min-filter，N=5），不是阈值也不是中值。**
   阈值 600ms 会让 490ms 尖峰照样通过；中值滤波会被「连续 3 个以上尖峰」带跑。
   排队延迟恒为正、真实 RTT 是下界 ⇒ 只有窗口内所有样本都变高才是真拥塞。
+  （实现：`net::rtt::RttFilter`，窗口 `RTT_WINDOW = 5`、可信上限 `MAX_TRUSTED_RTT_MS`，
+  `Session` 持有一个实例；档位状态机是 `video::link` 的 `LINK_TIER`。）
 - **`TestDelay` 必须区分 `from_client`**：`true` 是控制端自己的探测（原样回显，
   绝不能算本机 RTT），`false` 才是本机探测的回显。不区分会把「双方 1Hz 定时器的
   相位差」当 RTT（0~1000ms 缓慢漂移）⇒ `qos_fps` 在 1↔30 之间正弦振荡。
@@ -378,7 +545,7 @@ ConnectionRefused = 降档；其余 = 重建（连续 5 次才降档）。
 
 ### 关键帧 / 静止画面
 
-- **`request_keyframe()` 只置位，等下一帧 `encode()` 才生效**；画面静止时采集器一直
+- **`request_keyframe()`（`video::hub`）只置位，等下一帧 `encode()` 才生效**；画面静止时采集器一直
   返回 WouldBlock/TimedOut → 永不 encode → 对端永久花屏到重连。
   修法是保留上一帧 `yuv`，在 WouldBlock **或** TimedOut 分支里按
   `should_reemit_retained()` 重编一次。
@@ -398,25 +565,39 @@ ConnectionRefused = 降档；其余 = 重建（连续 5 次才降档）。
 
 ### 锁屏 / UAC / 会话
 
+- 这段的监听线程在 `app::secure_watch`（`spawn(capture_start_event, capture_stop_event)`）：
+  `UAC_FALLBACK_POLL_INTERVAL` / `SECURE_READY_WAIT_MS` / `SECURE_POLL_INTERVAL_MS`
+  三个常量随代码从 `app::run` 搬到那里。下面的结论都是针对这段代码的。
 - **`WTSDisconnected` 会话没有合成表面**：退出 RDP 后该会话停止被合成，
   `BitBlt` / `PrintWindow` / `DXGI` 全部拿不到像素。DC 能建出正确尺寸，缺的是**表面**。
   虚拟显示器只加设备、不加表面，解决不了。
   现状：`session_state()` 判 `may_have_surface()`，为假时写一张 GDI 绘制的**状态图**
   进 SHMEM，让控制端看到「为什么没画面」；SYSTEM 子进程改放在**控制台会话**。
   诚实结论：RDP 连接会顶掉控制台会话，只有控制台停在登录界面（无人登录）时才稳定可采。
-- **`set_uac_active` 的唯一权威是 main 进程**，`sos_video` 绝不能自己翻 —— 否则会在
+- **`set_uac_active` 的唯一权威是 main 进程**，`video` 绝不能自己翻 —— 否则会在
   SHMEM 未注册时硬失败并每 3s 刷 `SOS SHMEM not registered`。
 - `acquire_uac_capturer()` 返回的宽高**以 SHMEM 帧头为准**，不能用注册时记下的值
   （启动时枚举可能为空，会退化成 1280x720，与真实帧不符 → I420 错位）。
-- **安全桌面上必须挂起光标/位置服务**（1s 定时查 `secure_desktop()`），否则每秒两条
+- **安全桌面上必须挂起光标/位置服务**（250ms 定时查），否则每次两条
   `拒绝访问 (os error 5)`。取消订阅**不会**杀服务线程（`repeat` 的循环条件是
   `active()`），所以 `new_cursor()` / `new_pos()` 要用 `OnceLock` 全局唯一 + `SvcGuard`。
+  - 判据必须同时包含**会话断开**：`!secure_desktop() && session_state().may_have_surface()`。
+    只看 `secure_desktop()` 会漏掉「RDP 断开」那一刻 —— 现场日志里 `input_desktop=
+    <open failed 5>` 时 `desktop_changed()` 还没翻成 TRUE，于是每条连接都会先漏 1~2 条
+    `Error of mouse_cursor service: 拒绝访问` 才轮到挂起。
+  - 轮询周期是 **250ms**（不是 1s）：这个判据只有一次桌面句柄比较 + 一次 WTS 查询，
+    而漏判的代价是上游 `repeat` 在失败回调里各记一条 ERROR 并白跑一个 33ms 轮询。
+- **断开的会话里采集线程必须停止撞 `BitBlt`**：`Disconnected` 状态下 Windows 不合成
+  桌面，重试 25Hz 只会空转 —— 现场日志 10 秒刷了 495 次 `BitBlt: 句柄无效`，还每 5 秒
+  重建一次采集器。现在按 1 秒分片小睡（每片 250ms 探测会话是否回来），既不做无效采集，
+  也不会把恢复延迟叠加到 2 秒的状态轮询上（`SESSION_CHECK_INTERVAL`）。
+  同理「仍无帧 → 重建采集器」这个自愈动作只在 `may_have_surface()` 为真时做。
 - 锁屏 / UAC / RDP 断开时 `Display::all()` 为空。`send_login_response` 必须上报
-  **占位显示器**（`sos_display::primary_size()`，失败回退 1024x768），否则上游
+  **占位显示器**（`capture::display::primary_size()`，失败回退 1024x768），否则上游
   `handle_peer_info` 直接报 "No displays" ⇒ 用户连不上「重启后无人登录」的机器，
   而这正是远程协助最常见的场景。`create_shmem` 同理，不能 `Display::all()?` + `bail!`。
 - 解锁后采集线程按真实设备名查 QoS，而 `Session` 可能缓存了空串 ⇒ 帧率恒默认值、
-  码率上报 0。`Session::qos_display_name()` 优先读 `sos_video::cached_display_name()`。
+  码率上报 0。`Session::qos_display_name()` 优先读 `video::cached_display_name()`。
   缓存读只加锁读字符串，可放进每秒路径；**不能**回退 `display_info()`（数十毫秒）。
 
 ### 输入
@@ -429,15 +610,85 @@ ConnectionRefused = 降档；其余 = 重建（连续 5 次才降档）。
 - 双进程下 `LATEST_PEER_INPUT_CURSOR` 不共享（SYSTEM 子进程更新的是自己的副本），
   `run_pos` 的 exclude 逻辑永远不生效，控制端会收到自己的光标回显 —— 已知且可接受。
 
+### 连接确认弹窗（默认开启，无开关）
+
+- **语义与上游 `approve-mode=both` 一致：点击是密码的「替代」，不是附加条件。**
+  两条路径谁先完成谁生效（`src/server/connection.rs`）：
+  * 密码正确（`:3091`）→ 直接放行，不弹窗；
+  * 空密码（`:3066` `lr.password.is_empty()`）→ 弹窗，**一个包都不回**；
+  * 密码错误（`:3083`）→ 回 `Wrong Password` + **也弹窗**（本机用户仍可同意）。
+  所以弹窗出现时，控制端**正停在它自己的密码输入框上** —— 两个 UI 并存，这也是上游
+  的行为。**没有开关**：SOS 恒走 both 语义，唯一的例外是下面那条「用户看不见就不弹」。
+- 因此 `wait_for_local_approval` 在等弹窗的同时**必须继续读这条连接**：控制端可能
+  正在输密码，输对了就要走密码路径并 `cancel_pending()` 把弹窗收掉。
+- 上游只在 `approve_mode=Click`（本机没有有效密码）时才回
+  `LOGIN_MSG_NO_PASSWORD_ACCESS`（`:3057`）。SOS 恒有密码、走的是 both 语义，
+  所以等待期间**不发这条响应** —— 发了会让控制端 `dismissAll` 把密码框换成
+  「等待接受」提示，反而破坏了「两个 UI 并存」。
+- **拒绝必须沿用上游文案**：`send_close_reason(stream, "")` →
+  `Misc.close_reason = "Closed manually by the peer"`。控制端 `check_if_retry()`
+  用 `text.contains("manually")` 决定要不要在错误框里给「重试」按钮
+  （`src/client.rs:5245`）。换成 "Rejected by the local user" 之类文案，对端会多出
+  一个 Retry 按钮，点一下又重新弹窗 ⇒ 把「拒绝」变成可以反复触发的骚扰。具体原因
+  （拒绝 / 超时 / 并发忙 / 弹窗建不出来）只记本机日志，不上线。
+- 弹窗是 Win32 顶层窗口 + 自己的消息循环（`ui::consent` 的私有 `show`，对外只有
+  `confirm`），**必须在 `spawn_blocking` 里跑**，不能占住 tokio worker（`confirm` 已这么做，
+  调用方不要直接调 `show`）。
+- **界面观感**（实测截图核对过）：清单文件 `res/sos.manifest` 只声明 Common-Controls 6，
+  打开视觉样式，按钮/边框走系统主题；字体取 `SPI_GETNONCLIENTMETRICS` 的
+  `lfMessageFont`（现代系统上是 Segoe UI 9pt），标题在它基础上加粗放大 4/3 ——
+  不要用 `DEFAULT_GUI_FONT`，那是 8pt MS Shell Dlg，弹窗会显旧。
+  版式是「标题 + 分隔线 + 标签/取值两列 + 灰色说明 + 右下按钮」，尺寸按
+  `GetDC(NULL)` 的 `LOGPIXELSX` 缩放（进程是系统 DPI 感知，窗口不会被逐屏缩放）。
+  - 清单里**刻意不写** `dpiAware` / `supportedOS`：前者会改进程 DPI 感知级别，
+    影响采集与输入注入依赖的坐标语义；后者会改 `GetVersionEx` 的返回值。
+  - 清单必须用**绝对路径**传给 `winres`：rc.exe 在 OUT_DIR 里跑，相对路径会解析成
+    OUT_DIR/../res/...，实测报 RC2135。
+  - 静态文本要接 `WM_CTLCOLORSTATIC`（0x0138）才能上色：控件按 ID 区分，标签与
+    说明用 `COLOR_GRAYTEXT`，取值用 `COLOR_WINDOWTEXT`，否则一律是黑色。
+- **同一时刻只允许一个弹窗**：并发请求直接按 `Busy` 拒绝，不排队 —— 排队等于让
+  攻击者用重连堆出弹窗风暴，或者把阻塞线程池占满。
+- 弹窗建不出来时**不算拒绝**（`Decision::Unavailable` ⇒ `Approval::NoDialog`）：
+  退回「只认密码」继续等。弹窗是密码的**替代**路径，不是前置条件 —— 因为窗口创建
+  失败就拒绝，等于「系统出个小问题谁也连不上」，而它本来就没打算比密码更严格。
+  注意这与「拒绝」是两回事：真拒绝（点拒绝 / 超时 / 并发 Busy）仍然立刻关连接并
+  记一次失败。
+- **等待期间必须发保活**：控制端发出 `LoginRequest` 后有 30s「无数据」看门狗
+  （`src/client/io_loop.rs:337`，与它是否正在显示等待提示无关），所以
+  `wait_for_local_approval` 每 `WAIT_REFRESH`（10s）发一个空 `Message` 保活
+  （判断依据就是 `next_timeout` 返回 None）。这样窗口才能开满
+  `CONSENT_TIMEOUT`（180s，与上游 `LOGIN_GRACE` 对齐），而且控制端的密码框
+  一直留在屏幕上。
+- **保活包必须是空 `Message`，不能重发那条 LoginResponse**：控制端的
+  `wait-remote-accept-nook` 走 `showWaitAcceptDialog`，而它开头就
+  `dialogManager.dismissAll()`（`flutter/lib/common/widgets/dialog.dart:1398`）
+  —— 每 10s 重发等于让控制端对话框每 10s 被关掉再弹一次。空消息不命中任何分支
+  （`src/client/io_loop.rs:2588` 的 `_ => {}`），只在收包处刷新
+  `last_recv_time`（`:303`）。上游自己也用空 `Message` 当空包敲对端
+  （`src/client.rs:1698`）。
+- 保活发送失败 ⇒ 控制端已断开 ⇒ `cancel_pending()` 立刻收窗（`PostMessageW`
+  投 `IDCANCEL`），别让用户对着没人的弹窗点「同意」，也别让 `GATE` 被占住。
+- **用户看不见就不弹**（`net::connection` 的 `local_user_can_approve`）：判据是
+  `!secure_desktop() && session_state().may_have_surface()`，为假时**跳过弹窗**、
+  退回「密码即授权」（等价于旧行为）。
+  - 为什么不是「弹了等超时」：锁屏 / UAC 期间活动桌面是 Winlogon，窗口只能建在用户
+    Default 桌面上 ⇒ 用户看不见也点不到，弹出等于白等 180s 再拒绝，把「有人在场」
+    误判成「无人值守」。会话断开（退出 RDP）同理，那一侧没人在看屏幕。
+  - 这条判断只看**本机**状态，不看请求方。用户解锁后下一次连接就会正常弹窗。
+  - 放在调用方而不是 `ui::consent` 里：弹窗模块只 `use` win32 / std / `hbb_common`，
+    不引用本 crate 的其他模块（`ui/consent.rs` 至今如此）。它只负责「弹出窗口并回一个
+    决定」，而「本机现在该不该弹」依赖会话/安全桌面状态，那是调用方的事 —— 塞进弹窗
+    就得让它依赖 `capture::uac`，从此拖着一整套采集/会话代码。
+
 ### CPU / 进程
 
 - **采集线程禁止调用 `librustdesk::platform::windows::is_process_consent_running()`**：
   它实现为 `cmd /C tasklist | findstr consent.exe`，每次建 3 个进程，**实测 205ms**
-  ⇒ 每秒给视频链路插一次 200ms 停顿。用 `sos_uac` 的 `CreateToolhelp32Snapshot`
+  ⇒ 每秒给视频链路插一次 200ms 停顿。用 `capture::uac` 的 `CreateToolhelp32Snapshot`
   快照（**4.24ms**，48× 快）。
 - 同理 `current_display_size()` 不要用 `Display::all()`（要建 DXGI 工厂，1.47ms 起），
   用 `GetSystemMetrics`（0.00ms）。
-- `sos_cpu` 用 `GetSystemTimes` 替代上游 PDH（单次内核调用约 1μs，不经过
+- `app::cpu` 用 `GetSystemTimes` 替代上游 PDH（单次内核调用约 1μs，不经过
   PDH / WMI / 任何 provider）。注意 `kernel` 时间**包含 idle**，
   `busy = (kern_d - idle_d) + user_d`，漏减会恒接近 100%。
 - `platform/windows.cc` 里 `ImpersonateLoggedOnUser` 之后**必须 `RevertToSelf()`**。
@@ -445,7 +696,7 @@ ConnectionRefused = 降档；其余 = 重建（连续 5 次才降档）。
   winlogon 的 SYSTEM 身份运行，这是安全软件 HIPS 里最高等级的告警特征。
 - `SetWinEventHook` / 管道 / 单实例都影响这个：早期「两个实例抢同一管道 → 抢输的
   毫秒级退出 → 看门狗立刻重启」造成高频 `CreateProcessWithTokenW` 循环，最终表现为
-  `Winmgmt` 高 CPU。单实例互斥体 + 看门狗指数退避就是为了掐断这条链。
+  `Winmgmt` 高 CPU。单实例互斥体 + 看门狗指数退避（退避实现现在在 `app::watchdog`）就是为了掐断这条链。
 
 ### 环境事实
 
@@ -481,13 +732,76 @@ ConnectionRefused = 降档；其余 = 重建（连续 5 次才降档）。
 
 - 运行：`cargo test --manifest-path d:\code\rustdesk\sos-client\Cargo.toml`
   （见 §3 第 3 条，别省 `--manifest-path`）。
+  **解锁桌面约 25 秒，锁屏时约 80 秒**（差在采集类测试的空转预算，见下）。
 - `tests/support/` 放共用内容生成器（在子目录里，不会被当成测试目标）。
+- **集成测试走库，不要再 `#[path]` 直接包含源文件**：写成
+  `use rustdesk_sos::video::vpx as sos_vpx;`（`as sos_<旧名>` 只是保住原有调用点，
+  模块真名是 `video::vpx`）。现在 `tests/` 里只剩 `#[path = "support/desktop.rs"]`
+  这种对共用辅助模块的引用；**不要再写出指向 `../src/` 的 `#[path]`** —— 那等于把
+  源文件重新编进每个测试二进制，还会绕开可见性：集成测试在 crate 外，`pub(crate)`
+  根本看不见，这正是「测试只依赖公开面」的保证来源。
+- **库有 doctest**：`cargo test` 会编译文档注释里的围栏代码块。引用外部源码（例如
+  hbbs 的 Rust 片段）的块必须标 `text`，否则被当成示例编译并失败 —— `net/relay.rs`
+  就是这么改过来的。新增文档块时同样处理。
+- **纯测量型基准默认不跑**（`#[ignore]`）：13 个文件**一个断言都没有**，
+  只打印数字供人看，跑它们只有成本没有收益，而且曾经占掉整套 `cargo test`
+  187 秒里的 167 秒。要跑某个基准：
+
+  ```powershell
+  cargo test --manifest-path d:\code\rustdesk\sos-client\Cargo.toml --test vpx_drop_diag -- --ignored --nocapture
+  cargo test --manifest-path d:\code\rustdesk\sos-client\Cargo.toml -- --ignored   # 全部基准
+  ```
+
+  已忽略的文件：`vpx_drop_diag` `vpx_rc_mode` `vpx_mem` `vpx_enc_throughput` `vpx_cpuused`
+  `vpx_budget` `vpx_screen_content` `periodic_cost` `hw_vs_sw_bench` `vpx_threads`
+  `enc_bench` `codec_cost` `gdi_bench`。**新增基准请照此办理**（`#[test]` 下面加
+  `#[ignore = "实机基准…"]`），不要往默认流程里塞。
 - 不少测试是**实机基准**（编码吞吐、内存、采集延迟），数值随机器变化，
   它们的作用是「同机 A/B 对比」，不要按注释里的绝对数字做断言。
+- **采集类测试都要能在「抓不到帧」的环境里优雅跳过**（锁屏 / 会话断开 / 同一个二进制里
+  两个测试抢 DXGI duplication —— 每个输出只允许一个）：
+  * 先做**前置探测**（跑几百毫秒动画窗口再试着抓几帧），一帧都抓不到就打印 `[skip]` 后
+    `return`，不要 `assert`。真正该失败的只有「抓到了帧却编不出包」那种。
+  * 循环必须有**墙钟预算**：`dxgi_long` 曾按 300 帧 × 200ms 超时 = 空转 60 秒，现在 6 秒。
+  * 同一文件里的多个采集测试要用 `static Mutex` 串起来（`dxgi_long` 的 `CAPTURE_GATE`）：
+    原注释要求调用方加 `--test-threads=1`，但要求人记住参数不可靠，实测并行时后建的那个
+    采集器 `ok=0/20`。
 - 涉及真实桌面的测试在锁屏 / RDP / 无 DXGI 环境下会走降级路径，属预期。
-- 策略集中写成纯函数放在 `sos_vpx`（`choose_codec`、`bitrate_kbps_for`、
+- **策略 / 判定逻辑必须提成 crate 内可见的纯函数，测试直接打真实实现。**
+  `tests/` 里**不要**再复刻一份判定规则。历史教训：复刻版测试全绿，而生产改动
+  根本没有生效；复刻版还漏了 `MAX_TRUSTED_RTT_MS` 校验，等于把 bug 一起抄走了。
+  现在直接打真实实现的有三处：
+  * `tests/p2p_logic.rs` → `use rustdesk_sos::net::relay::{classify_nat, must_relay};`
+    （不再复刻 NAT 判定与中继决策规则）
+  * `tests/rtt_filter.rs` → `use rustdesk_sos::net::rtt::{RttFilter, RTT_WINDOW};`
+    （不再复刻窗口逻辑）
+  * `tests/desktop_unavailable.rs` 的 `only_no_display_is_treated_as_transient`
+    → `rustdesk_sos::video::is_no_display_error`。
+  所以新写策略时先在库里放一个 `pub fn`（`video::vpx` / `video::link` / `video::ladder` /
+  `video::hub` / `net::rtt` / `net::relay` 就是这么分布的），再让测试 `use` 它；
+  **不要**把规则内联在生产路径里、再抄一份到测试。
+- **仍然保留复刻 / 自建的三处，都是刻意的**：
+  * `enc_bench`：测**生产编码器** `video::vpx` 的本机吞吐（原「上游基线」已退场，
+    见下方「基准怎么在不改上游的前提下做公平对比」）；
+  * `dxgi_live`：测**上游** `scrap` 的 DXGI 行为（静止桌面 `WouldBlock`、真实变化时
+    出帧），不是测自建 `capture::dxgi`；
+  * `gdi_bench`：纯 Win32 开销拆解（BitBlt / CAPTUREBLT / GetDIBits / 全帧翻转），
+    只量系统调用，不经过本项目代码。
+  > **基准怎么在不改上游的前提下做公平对比**：两个编码基准都跑生产编码器
+  > （`video::vpx`），并在创建前调 `sos_vpx::set_rc_override(Some((1000, 0)))` ——
+  > buffer 1000ms + `rc_dropframe_thresh = 0`。不这么做的话，硬内容会触发丢帧
+  > （实测 40 帧只出 1 个包），被丢的帧不参与编码却照样计入耗时，fps 被抬高。
+  > 这个钩子是本 crate 的 `#[doc(hidden)]` 诊断 API（线程局部，生产不调用），
+  > **不需要动 `libs/scrap`**。两个基准还会打印 `encoded=N/frames`，丢帧不会再被
+  > 静默忽略。
+  另外 `desktop_unavailable` 里还有三条仍是规则复刻（重建退避曲线、日志闸门、
+  `gap_ms` 统计），因为 `MAX_REBUILD_BACKOFF`、`GAP_OUTAGE_MS` 还是 `video` /
+  `net::connection` 的私有常量；要消掉它们得先把常量公开，算单独一步。
+- 其余策略仍集中在 `video::vpx`（`choose_codec`、`bitrate_kbps_for`、
   `encoder_behind_budget`、`should_reemit_retained`、`LinkTier` 等），
   单测直接打这些函数，不要为测行为去搭采集器。
+- 现状：`cargo check --all-targets`（在 `sos-client` 内）**0 error / 0 warning**，
+  7 条历史 test 警告已清。新增测试与测试侧改动不要再引入 SOS 侧警告。
 
 ---
 
@@ -518,4 +832,6 @@ ConnectionRefused = 降档；其余 = 重建（连续 5 次才降档）。
 | UDP 打洞未实现 | 依赖上游私有 `mod kcp_stream`；TCP 打洞 + 中继已够用（控制端 `select_ok` 会选中 TCP 分支） |
 | 音频 / 端口转发 / 摄像头 / 隐私模式 / 远程打印 / 终端服务 | 有意移除 |
 | 4 核机上 VP9 1080p 编不到 30fps | 软件编码物理上限；由 `ENC_LEVEL` 逐级降 `cpu-used`，实测不划算才试 VP8 |
-| 硬编码器（NVENC/QSV/AMF/MFT） | 已评估并否决：MFT 软件 H.264 总 CPU 与 VP9 相同、关键帧大一倍、无丢帧机制；硬件 MFT 需 D3D11 纹理池，生产化成本高 |
+| ~~AMD（AMF）机器上没有硬件 H.264~~ **已修复** | 三层原因叠在一起，缺一层都不行：(1) `hwcodec` 给 AMF 设私有选项 `query_timeout`，**FFmpeg 7.1 已移除该选项** ⇒ `Option not found`；(2) 更关键的是 FFmpeg 侧还要有上游的 `0008-remove-amf-loop-query` 补丁，否则 AMF 的 `QueryOutput` 阻塞轮询会让**试编码超时**（实测 `Encoder h264_amf test attempt 1 returned error: -1`），编码器建得出来但探测判它不可用；(3) `hwcodec` 把「设调优项失败」当致命错误，直接放弃编码器。**上游能用的原因是它自己的 vcpkg overlay 给 FFmpeg 打了这两个补丁**（`res/vcpkg/ffmpeg/patch/0001`、`0008`）。SOS 的做法（全部在 `sos-client/` 内，**上游一行没改**）：`sos-client/vcpkg/ffmpeg/` = 完整 FFmpeg 端口 + 这两个上游补丁（上游 overlay 会 `--disable-swresample`，而 hwcodec 的 `dec.o` 需要 `swr_*`，所以不能直接复用上游 overlay）；`sos-client/vendor/hwcodec/` = 本地副本，把调优项失败降级为警告。实测（Radeon 780M，`tests/hw_vs_sw_bench`，软件侧现已跑**生产** `video::vpx`）：1600x900 VP9 3.43ms → AMF **2.85ms**；1080p 3.93ms → **3.49ms**，`max` 24.3-24.9ms → **9.4-10.8ms**。**旧记录的 9.5/12.0ms 是上游编码器数（它每帧 `flush()`，比生产链路慢一倍多），不能当基准**：8 核机上硬件只快 11%-17%，真正的收益在 4 核机（1080p 软编 24-27ms）与最差帧延迟上。 |
+| 硬件编码没有「编码器内部丢帧」 | 没有 `rc_dropframe_thresh` 的等价物 ⇒ `take_dropped_frames()` 恒 0，拥塞保护只剩发送侧 `MAX_VIDEO_BACKLOG`。`dropframe_thresh_for_link()` 对硬件后端是空转。 |
+| 硬件编码没有「强制 IDR」 | hwcodec 只暴露 `new/encode/set_bitrate` ⇒ `force_keyframe()` 实现为**重建编码器**（新序列首帧必是 IDR），代价是一次编码器初始化。 |

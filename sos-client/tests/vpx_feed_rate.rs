@@ -18,8 +18,7 @@
 
 #![cfg(all(windows, sos_vpx))]
 
-#[path = "../src/sos_vpx.rs"]
-mod sos_vpx;
+use rustdesk_sos::video::vpx as sos_vpx;
 
 use sos_vpx::{SosCodec, SosVpxConfig, SosVpxEncoder};
 use std::time::{Duration, Instant};
@@ -378,6 +377,7 @@ fn run_motion(codec: SosCodec, bitrate: u32, frames: usize, cpu_used: u32) -> Re
 /// 这是修复思路的可行性验证：如果按实际喂帧率缩放码率后丢帧消失，
 /// 就说明采集循环里应该用**实测喂帧率**而不是 QoS 的标称帧率来算码率。
 #[test]
+#[ignore = "实机基准（无断言，只打印表格）：需要时 -- --ignored"]
 fn matching_bitrate_to_actual_feed_rate_fixes_starvation() {
     let frames = 90usize;
     let every = 3u32; // 实际约 10fps

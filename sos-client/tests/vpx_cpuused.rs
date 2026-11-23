@@ -12,8 +12,7 @@
 
 #![cfg(all(windows, sos_vpx))]
 
-#[path = "../src/sos_vpx.rs"]
-mod sos_vpx;
+use rustdesk_sos::video::vpx as sos_vpx;
 
 use sos_vpx::{SosCodec, SosVpxConfig, SosVpxEncoder};
 use std::time::{Duration, Instant};
@@ -99,6 +98,7 @@ fn measure(
 }
 
 #[test]
+#[ignore = "实机基准，默认不跑；cargo test -- --ignored 或 --test <name> -- --ignored"]
 fn cpu_used_vs_rate_control_accuracy() {
     let target = 1675u32;
     println!("目标码率 {target}kbps, 1920x1080@30fps, 运动型内容");

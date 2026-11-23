@@ -15,8 +15,7 @@
 
 #![cfg(windows)]
 
-#[path = "../src/sos_display.rs"]
-mod sos_display;
+use rustdesk_sos::capture::display as sos_display;
 
 use sos_display::{resolve_index, size_by_name, size_changed};
 

@@ -17,6 +17,12 @@ readme = "README.md"
 # 内部交付件，不发布到 crates.io
 publish = false
 
+# 库 + 二进制两个 target：逻辑全在库里，`tests/*.rs` 直接 `use rustdesk_sos::…`。
+# 名字显式写出来，避免依赖「包名把 - 换成 _」的隐式推导。
+[lib]
+name = "rustdesk_sos"
+path = "src/lib.rs"
+
 [[bin]]
 name = "rustdesk-sos"
 path = "src/main.rs"
@@ -36,6 +42,22 @@ FileDescription = "RustDesk SOS 精简受控端 - 单文件远程协助客户端
 OriginalFilename = "rustdesk-sos.exe"
 CompanyName = "RustDesk SOS maintainers"
 LegalCopyright = "Copyright (C) RustDesk SOS maintainers. Licensed under AGPL-3.0."
+
+[features]
+# 硬件 H.264 编码（FFmpeg 的 nvenc/qsv/amf，走 CPU 的 NV12）**默认开启**。
+#
+# 打开它需要构建机上有 vcpkg 的静态 FFmpeg：`$VCPKG_ROOT/installed/x64-windows-static/lib`
+# 下要有 avcodec/avutil/avformat/swresample/libmfx（由本仓库 `vcpkg.json` + `res/vcpkg`
+# overlay 装出来）。FFmpeg 是**静态链进产物**的，目标机不需要装任何东西。
+#
+# 值得知道的两条限制（详见 AGENTS.md §11）：
+#   - AMD/AMF 在当前上游 hwcodec 上不可用（FFmpeg 7 删了它要设的 `query_timeout`）；
+#   - 产物体积会从约 13.6 MB 涨到约 29.4 MB（压缩前）。
+#
+# 临时不要硬件编码（不需要 FFmpeg 静态库、体积回到 13.6 MB）：
+#   cargo build --release --no-default-features
+default = ["hwcodec"]
+hwcodec = ["dep:hwcodec"]
 
 [dependencies]
 # 核心公共库
@@ -97,6 +119,12 @@ rustdesk = { path = ".." }
 
 log = "0.4"
 
+# 硬件编码器（FFmpeg 的 nvenc/qsv/amf）。**直接依赖本 crate**，不走
+# `rustdesk/hwcodec` feature：后者会把它编进上游的 `librustdesk`（cdylib 也在内），
+# 从而需要往上游 `libs/scrap/build.rs` 加链接参数 —— 那是改上游，不允许。
+# 直接依赖后只有 sos 自己的 bin/tests 会链接它，链接参数由本项目的 `build.rs` 提供。
+hwcodec = { git = "https://github.com/rustdesk-org/hwcodec", rev = "ec38ebaf2454269d4c5668a57e3813c6e5541be7", optional = true }
+
 # 工具
 anyhow = "1.0"
 hex = "0.4"
@@ -124,6 +152,17 @@ bindgen = "0.72.1"
 #   cannot find function `set_no_congestion_control` in `webrtc::sctp::association`
 #
 # 上游调整这些 rev 时，跟着根 `Cargo.toml` 的 `[patch.crates-io]` 一起更新。
+
+# hwcodec 用本地副本（`vendor/hwcodec`），只为改一处：把「可选延迟调优项设置失败」
+# 从致命错误降级为警告。原因是 FFmpeg 7.1 移除了 AMF 的 `query_timeout` 选项，
+# 上游代码在 AMD 机器上会因此直接放弃 h264_amf/hevc_amf —— 而目标机器（Radeon 780M）
+# 恰恰是 AMD。详见 `vendor/hwcodec/cpp/common/util.cpp` 里 `set_lantency_free` 的注释。
+#
+# 注意：与 `[patch.crates-io]` 一样，patch 只对**声明它的 workspace 根**生效，
+# 所以必须写在 `sos-client/Cargo.toml` 里（根仓库那份是给上游自己构建用的）。
+[patch."https://github.com/rustdesk-org/hwcodec"]
+hwcodec = { path = "vendor/hwcodec" }
+
 [patch.crates-io]
 libxdo-sys = { path = "../libs/libxdo-sys-stub" }
 # 逐块扩展读缓冲，而不是一来表头就按它声明的长度预留整帧。
@@ -134,6 +173,16 @@ webrtc = { git = "https://github.com/rustdesk-org/webrtc", rev = "49c89bd8d30e6e
 webrtc-util = { git = "https://github.com/rustdesk-org/webrtc", rev = "49c89bd8d30e6e62e4c1a96cee38fdc11f79ef63" }
 webrtc-sctp = { git = "https://github.com/rustdesk-org/webrtc", rev = "49c89bd8d30e6e62e4c1a96cee38fdc11f79ef63" }
 
+
+# debug 构建只保留行号表（`debug = 1`），不生成变量级 DWARF。
+#
+# 本项目从不在调试器里单步看变量：排查全靠日志（§8）与 panics 的 backtrace，
+# 而 `debug = 2`（默认）会让每个测试二进制产出 ~430 MB 的 PDB —— 36 个测试就是
+# 24 GB/代，加上 cargo 不回收历史 hash 产物，几天就能把 target/debug 撑到 150 GB。
+# 实测（2026-11）：`debug = 2` 一代 29.1 GB → 改成 1 后见 README「清理 debug 产物」。
+# backtrace 仍有 `文件:行号`，只是调试器里看不到变量值。
+[profile.dev]
+debug = 1
 [profile.release]
 opt-level = "s"
 lto = true

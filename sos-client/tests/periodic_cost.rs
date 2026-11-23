@@ -9,8 +9,7 @@
 
 #![cfg(windows)]
 
-#[path = "../src/sos_uac.rs"]
-mod sos_uac;
+use rustdesk_sos::capture::uac as sos_uac;
 
 use std::time::{Duration, Instant};
 
@@ -26,6 +25,7 @@ fn bench<F: FnMut()>(name: &str, iters: u32, mut f: F) {
 }
 
 #[test]
+#[ignore = "实机基准，默认不跑；cargo test -- --ignored 或 --test <name> -- --ignored"]
 fn periodic_check_cost() {
     println!("=== 周期性检查耗时（每秒执行一次的代价）===");
 

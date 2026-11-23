@@ -22,8 +22,7 @@
 
 #![cfg(all(windows, sos_vpx))]
 
-#[path = "../src/sos_vpx.rs"]
-mod sos_vpx;
+use rustdesk_sos::video::vpx as sos_vpx;
 
 use sos_vpx::{LinkTier, LINK_BAD_SAMPLES_TO_DOWNGRADE, LINK_GOOD_SAMPLES_TO_UPGRADE};
 

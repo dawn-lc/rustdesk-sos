@@ -20,11 +20,10 @@
 
 #![cfg(all(windows, sos_vpx))]
 
-#[path = "../src/sos_vpx.rs"]
-mod sos_vpx;
-
 #[path = "support/desktop.rs"]
 mod desktop;
+
+use rustdesk_sos::video::vpx as sos_vpx;
 
 use std::time::Instant;
 
@@ -36,6 +35,8 @@ const WARMUP: usize = 10;
 
 struct Cost {
     enc_ms: f64,
+    /// 实测最长单帧耗时，保留供人工查看（当前输出不打印它）
+    #[allow(dead_code)]
     enc_max_ms: f64,
     kbps: f64,
     q_avg: f64,
@@ -91,6 +92,7 @@ fn measure(codec: SosCodec, threads: usize, w: usize, h: usize, kbps: u32) -> Op
 }
 
 #[test]
+#[ignore = "实机基准，默认不跑；cargo test -- --ignored 或 --test <name> -- --ignored"]
 fn vp8_vs_vp9_cost_table() {
     println!();
     println!("帧预算：30fps → 33.3ms，扣掉采集+转换约 7ms 后编码可用约 26ms");
@@ -166,6 +168,7 @@ fn vp8_vs_vp9_cost_table() {
 /// 若 `thresh=20` 时 `drops` 占绝大多数而 `thresh=0` 时耗时才回来，
 /// 就证明「VP8 更快」是丢帧造成的假象。
 #[test]
+#[ignore = "实机基准，默认不跑；cargo test -- --ignored 或 --test <name> -- --ignored"]
 fn vp8_apparent_speed_is_dropped_frames() {
     let (w, h, kbps) = (1600usize, 900usize, 1163u32);
     println!();

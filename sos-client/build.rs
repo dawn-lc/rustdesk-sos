@@ -16,6 +16,14 @@ fn main() {
         println!("cargo:rerun-if-changed=Cargo.toml");
         let mut res = winres::WindowsResource::new();
         res.set_icon("../res/icon.ico");
+        // 打开视觉样式（按钮/边框走现代主题）。清单里只声明 Common-Controls 6，
+        // 刻意不写 dpiAware / supportedOS —— 见 res/sos.manifest 的注释。
+        //
+        // 必须是绝对路径：rc.exe 在 OUT_DIR 里运行，相对路径会解析成
+        // OUT_DIR/../res/...，实测报 RC2135。分隔符换成 `/`，避免反斜杠被当转义。
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("res/sos.manifest");
+        let manifest = manifest.to_string_lossy().replace('\\', "/");
+        res.set_manifest_file(&manifest);
         res.compile().unwrap();
     }
     // 协议类型全部来自 `base` crate（它自己生成 `message.proto`）。
@@ -29,6 +37,20 @@ fn main() {
         cc::Build::new().file(file).compile("sos_windows");
         println!("cargo:rustc-link-lib=WtsApi32");
         println!("cargo:rerun-if-changed={}", file);
+    }
+
+    // 启用硬件编码时补几个 hwcodec 需要的静态库。
+    //
+    // hwcodec 自己的 build.rs 只链接 avcodec/avutil/avformat，但它的 `dec.o` 引用
+    // `swr_*`（libswresample），`mfenc.o`/`mf_utils.o` 引用 `IID_ICodecAPI`、
+    // `IID_IMFTransform`、`IID_IMFMediaEventGenerator`（mfuuid/mfplat/strmiids），
+    // 少了会 LNK2019。上游把这几个改在 `libs/scrap/build.rs` 里加，但那是改上游；
+    // 本项目直接依赖 hwcodec，链接参数由这里提供即可，上游一行都不用动。
+    #[cfg(windows)]
+    if std::env::var_os("CARGO_FEATURE_HWCODEC").is_some() {
+        for lib in ["swresample", "mfuuid", "mfplat", "strmiids"] {
+            println!("cargo:rustc-link-lib={}", lib);
+        }
     }
 
     // 生成 libvpx 绑定（仅 Windows）。

@@ -7,8 +7,7 @@
 
 #![cfg(all(windows, sos_vpx))]
 
-#[path = "../src/sos_vpx.rs"]
-mod sos_vpx;
+use rustdesk_sos::video::vpx as sos_vpx;
 
 use sos_vpx::{SosCodec, SosVpxConfig, SosVpxEncoder};
 use std::time::Instant;
@@ -99,6 +98,7 @@ fn measure(codec: SosCodec, w: usize, h: usize, threads: usize) -> Option<Measur
 }
 
 #[test]
+#[ignore = "实机基准，默认不跑；cargo test -- --ignored 或 --test <name> -- --ignored"]
 fn encoder_memory_by_config() {
     println!("进程初始工作集: {} MB", working_set() / 1024 / 1024);
     println!(

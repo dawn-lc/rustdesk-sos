@@ -18,19 +18,21 @@
 //! 2. 没有退避 —— 每秒空转一次完整显示器枚举；
 //! 3. `gap_ms[max]` 被抬到 **31508**，看起来像编码器故障。
 //!
+//! 只有 `only_no_display_is_treated_as_transient` 打库里的真实实现
+//! （`video::is_no_display_error`）。另外三条仍是规则复刻：退避曲线、日志闸门
+//! 与 gap 统计在 `video` / `net::connection` 里是内联实现，库里没有可调用的
+//! 公开函数（`MAX_REBUILD_BACKOFF`、`GAP_OUTAGE_MS` 都还是私有常量）。
+//!
 //! 运行：cargo test --release --test desktop_unavailable -- --nocapture
 
 #![cfg(all(windows, sos_vpx))]
 
+use anyhow::anyhow;
+use rustdesk_sos::video::is_no_display_error;
 use std::time::Duration;
 
-/// 重建退避的最大值（与 `sos_video::MAX_REBUILD_BACKOFF` 一致）
+/// 重建退避的最大值（与 `video::MAX_REBUILD_BACKOFF` 一致；该常量仍是私有的）
 const MAX_REBUILD_BACKOFF: Duration = Duration::from_secs(5);
-
-/// 与 `sos_video::is_no_display_error` 等价的判定
-fn is_no_display_error(msg: &str) -> bool {
-    msg.contains("no display") || msg.contains("SHMEM not registered")
-}
 
 /// 退避翻倍，封顶 5 秒
 fn next_backoff(cur: Duration) -> Duration {
@@ -105,11 +107,11 @@ fn log_gate_reports_once_per_outage() {
 #[test]
 fn only_no_display_is_treated_as_transient() {
     // 应走降噪路径（可自愈）
-    assert!(is_no_display_error("no display available"));
-    assert!(is_no_display_error("no display"));
+    assert!(is_no_display_error(&anyhow!("no display available")));
+    assert!(is_no_display_error(&anyhow!("no display")));
     // 「main 已判定安全桌面、首帧尚未到达」的竞态窗口，也是过渡态：
     // 现场日志里它曾每 3 秒刷一条 ERROR，把真正的问题埋掉了。
-    assert!(is_no_display_error("SOS SHMEM not registered"));
+    assert!(is_no_display_error(&anyhow!("SOS SHMEM not registered")));
 
     // 其他错误仍应是 ERROR：这些说明代码/环境真的有问题，不能被掩盖
     for msg in [
@@ -120,7 +122,7 @@ fn only_no_display_is_treated_as_transient() {
         "",
     ] {
         assert!(
-            !is_no_display_error(msg),
+            !is_no_display_error(&anyhow!("{}", msg)),
             "「{}」不应被当成可自愈的桌面不可捕获",
             msg
         );

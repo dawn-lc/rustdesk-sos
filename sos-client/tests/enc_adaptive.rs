@@ -19,8 +19,7 @@
 
 #![cfg(all(windows, sos_vpx))]
 
-#[path = "../src/sos_vpx.rs"]
-mod sos_vpx;
+use rustdesk_sos::video::vpx as sos_vpx;
 
 use sos_vpx::{
     encoder_behind_budget, next_enc_level, overload_is_severe, vp8_trial_worth_keeping,
@@ -250,7 +249,7 @@ fn vp8_trial_decision() {
 #[test]
 fn consecutive_window_policy() {
     const NEEDED: u32 = 3;
-    let mut run = |series: &[bool], label: &str| -> u32 {
+    let run = |series: &[bool], label: &str| -> u32 {
         let mut overload = 0u32;
         let mut downs = 0u32;
         for &over in series {

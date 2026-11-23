@@ -9,7 +9,6 @@
 
 use scrap::TraitCapturer;
 use std::time::{Duration, Instant};
-use windows::Win32::Foundation::HWND;
 use windows::Win32::Graphics::Gdi::{
     BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject,
     GetDC, GetDIBits, ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, CAPTUREBLT,
@@ -136,7 +135,7 @@ fn measure_flip_passes(w: usize, h: usize) -> f64 {
 }
 
 /// D: scrap 的完整 GDI 路径
-fn measure_scrap_gdi(w: usize, h: usize) -> Option<f64> {
+fn measure_scrap_gdi() -> Option<f64> {
     let mut displays = scrap::Display::all().ok()?;
     let display = displays.drain(..).next()?;
     let mut capturer = scrap::Capturer::new(display).ok()?;
@@ -160,6 +159,7 @@ fn measure_scrap_gdi(w: usize, h: usize) -> Option<f64> {
 }
 
 #[test]
+#[ignore = "实机基准，默认不跑；cargo test -- --ignored 或 --test <name> -- --ignored"]
 fn gdi_capture_breakdown() {
     let (w, h) = (1920i32, 1080i32);
     println!("=== GDI 采集耗时拆解 {}x{}，每项 {} 帧 ===", w, h, FRAMES);
@@ -184,7 +184,7 @@ fn gdi_capture_breakdown() {
     let flip = measure_flip_passes(w as usize, h as usize);
     println!("D. 手写镜像+旋转两遍全帧                  : {:8.2} ms/帧", flip);
 
-    if let Some(scrap_ms) = measure_scrap_gdi(w as usize, h as usize) {
+    if let Some(scrap_ms) = measure_scrap_gdi() {
         println!("E. scrap 完整 GDI frame()                 : {:8.2} ms/帧", scrap_ms);
         println!(
             "   → 理论下限 {:.2} ms，其中 GetDIBits 约 {:.2} ms、全帧翻转约 {:.2} ms",
@@ -197,6 +197,7 @@ fn gdi_capture_breakdown() {
 
 /// 分辨率缩放：判断 BitBlt 是否受内存带宽限制
 #[test]
+#[ignore = "实机基准，默认不跑；cargo test -- --ignored 或 --test <name> -- --ignored"]
 fn gdi_bitblt_scaling() {
     println!("=== BitBlt 随分辨率的缩放 ===");
     for (w, h) in [
@@ -222,6 +223,7 @@ fn gdi_bitblt_scaling() {
 
 /// 重复 BitBlt 同一区域：区分“固定开销”与“逐像素拷贝”
 #[test]
+#[ignore = "实机基准，默认不跑；cargo test -- --ignored 或 --test <name> -- --ignored"]
 fn gdi_bitblt_repeat_overhead() {
     println!("=== BitBlt 1920x1080 连续 100 次（检查是否有额外固定开销） ===");
     let (w, h) = (1920i32, 1080i32);

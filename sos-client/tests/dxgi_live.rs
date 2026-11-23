@@ -131,7 +131,13 @@ fn dxgi_static_vs_live() {
     let mut other = 0u32;
     let mut total = Duration::ZERO;
     let t = Instant::now();
+    // 墙钟预算：桌面静止 / 锁屏时每帧都要等满超时，60 次就是 12 秒。
+    const BUDGET: Duration = Duration::from_secs(4);
     for _ in 0..60 {
+        if t.elapsed() > BUDGET {
+            println!("提前结束：{}s 内无足够变化（桌面静止或已锁屏）", BUDGET.as_secs());
+            break;
+        }
         let f0 = Instant::now();
         match capturer.frame(Duration::from_millis(200)) {
             Ok(f) => {

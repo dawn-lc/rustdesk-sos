@@ -10,8 +10,7 @@
 
 #![cfg(windows)]
 
-#[path = "../src/sos_cpu.rs"]
-mod sos_cpu;
+use rustdesk_sos::app::cpu as sos_cpu;
 
 use std::time::{Duration, Instant};
 

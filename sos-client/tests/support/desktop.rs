@@ -63,6 +63,9 @@ pub fn desktop_y(w: usize, h: usize, seed: usize) -> Vec<u8> {
 }
 
 /// 桌面风格画面的 I420 帧（色度恒为中性 128 —— 桌面内容几乎没有色度细节）
+///
+/// 只有部分基准二进制用到它，未被引用的那些不应因此报警告。
+#[allow(dead_code)]
 pub fn desktop_i420(w: usize, h: usize, seed: usize) -> Vec<u8> {
     let (cw, ch) = (w / 2, h / 2);
     let mut buf = vec![0u8; w * h + 2 * cw * ch];

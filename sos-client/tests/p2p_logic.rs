@@ -17,20 +17,9 @@
 use hbb_common::protobuf::Enum;
 use hbb_common::rendezvous_proto::NatType;
 
-/// 与上游 `src/common.rs::test_nat_type_` 相同的判定规则：
-/// 两个端口都拿到值时才下结论；都拿到且相等 → ASYMMETRIC，否则 SYMMETRIC；
-/// 任一为 0（探测失败）→ **保持 UNKNOWN**，不能写成 SYMMETRIC。
-fn classify(ports: [i32; 2]) -> Option<NatType> {
-    if ports[0] > 0 && ports[1] > 0 {
-        Some(if ports[0] == ports[1] {
-            NatType::ASYMMETRIC
-        } else {
-            NatType::SYMMETRIC
-        })
-    } else {
-        None
-    }
-}
+// NAT 判定与中继决策直接打**生产实现**（`net::relay` 的纯函数），不再复刻一份：
+// 复刻版的旧问题是「测试全绿但生产走的是另一段代码」，改动不生效也测不出来。
+use rustdesk_sos::net::relay::{classify_nat as classify, must_relay as relay};
 
 #[test]
 fn same_external_port_is_asymmetric() {
@@ -56,12 +45,6 @@ fn failed_probe_keeps_unknown_not_symmetric() {
 /// 只在「明确已知对称 NAT」或对端强制中继、或对端地址无效时放弃打洞。
 #[test]
 fn relay_decision_matches_upstream() {
-    let relay = |force_relay: bool, remote: NatType, us: NatType, port: u16| {
-        force_relay
-            || remote == NatType::SYMMETRIC
-            || us == NatType::SYMMETRIC
-            || port == 0
-    };
 
     // 双方都 UNKNOWN（本机探测没成功）：照常尝试打洞，这很关键
     assert!(!relay(false, NatType::UNKNOWN_NAT, NatType::UNKNOWN_NAT, 50155));

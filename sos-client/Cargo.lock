@@ -3678,6 +3678,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "15cdd26707701c53297e2fa6afb323d55fbc1d0810c3aec078ae3ef0424c3c15"
 
 [[package]]
+name = "hwcodec"
+version = "0.8.0"
+dependencies = [
+ "bindgen 0.59.2",
+ "cc",
+ "log",
+ "serde 1.0.228",
+ "serde_derive",
+ "serde_json 1.0.150",
+]
+
+[[package]]
 name = "hyper"
 version = "1.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7199,6 +7211,7 @@ dependencies = [
  "hbb_common",
  "hex",
  "home",
+ "hwcodec",
  "log",
  "rustdesk",
  "scrap",
