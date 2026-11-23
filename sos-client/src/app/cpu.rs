@@ -30,7 +30,8 @@
 //! - 与任务管理器的数据源一致（`kernel` 含 `idle`，计算时要减掉）。
 //!
 //! 采样线程每 2 秒跑一次，与上游 PDH 的 `SAMPLE_INTERVAL` 保持一致，
-//! 使 `cpu_usage_one_minute()` 的语义不变。
+//! 使 `cpu_usage_one_minute()` 的语义不变；但**同步给上游缓存**按 10 秒一次
+//! （`SYNC_INTERVAL_SAMPLES`），因为上游每次同步都打一条 INFO，2 秒一条会把日志淹掉。
 
 #![cfg(windows)]
 
@@ -43,6 +44,20 @@ use windows::Win32::System::Threading::GetSystemTimes;
 
 /// 采样周期（与上游 PDH 的 `SAMPLE_INTERVAL: DWORD = 2` 一致）
 const SAMPLE_INTERVAL: Duration = Duration::from_secs(2);
+
+/// 向上游缓存同步的间隔（以样本数计，5 × 2s = 10s）。
+///
+/// 采样仍每 2 秒一次（一分钟窗口要准），但**同步**没必要这么勤：同步出去的值
+/// 本身就是「最近一分钟平均」，每 2 秒重算一个几乎不变的数字没有意义。
+/// 更要紧的是上游 `sync_cpu_usage()` 每次调用都打一条 INFO：
+/// `cpu usage synced: Some(..)` —— 现场日志里它每 2 秒一行，一天四万多行，把
+/// 真正有用的行全淹了。
+///
+/// 上限由上游读侧决定：`base::platform::windows::cpu_uage_one_minute()` 把
+/// 超过 **30 秒**没更新的值当成不可用（`instant.elapsed().as_secs() < 30`），
+/// 所以同步间隔必须明显小于 30s。取 10s：日志降到 1/5，值最多旧 10 秒
+/// （对一分钟平均无意义），且留 3 倍余量。**不要再往大调**。
+const SYNC_INTERVAL_SAMPLES: usize = 5;
 
 /// 保留多少个样本用于「最近一分钟」的平均值。
 /// 30 个 × 2 秒 = 60 秒，与上游 `queue.len() == 31` 的窗口等价。
@@ -109,6 +124,8 @@ pub fn start_cpu_monitor() {
             };
             // 首个样本需要一个间隔才有意义，先取一次差值再进入循环
             let mut window: Vec<f64> = Vec::with_capacity(WINDOW_SAMPLES);
+            // 已累积多少个样本还没同步：初值等于间隔，让第一个有效样本就同步一次
+            let mut since_sync = SYNC_INTERVAL_SAMPLES;
             loop {
                 std::thread::sleep(SAMPLE_INTERVAL);
                 let Some(cur) = system_times() else {
@@ -124,11 +141,16 @@ pub fn start_cpu_monitor() {
                     if let Ok(mut slot) = CPU_USAGE_ONE_MINUTE.lock() {
                         *slot = Some((avg, Instant::now()));
                     }
-                    // 同时写进上游缓存：`scrap::codec::codec_thread_num()` 等
-                    // 上游代码读的是 `base::platform::windows::cpu_uage_one_minute()`。
+                    // 按 `SYNC_INTERVAL_SAMPLES` 的节奏写进上游缓存（见该常量的说明）。
+                    // 上游代码读的是 `base::platform::windows::cpu_uage_one_minute()`；
                     // 我们自己不用它（video::vpx 的线程数由 recommended_threads 决定），
                     // 但库内其它调用点应当看到真实值而不是 None。
-                    base::platform::windows::sync_cpu_usage(Some(avg));
+                    if since_sync >= SYNC_INTERVAL_SAMPLES {
+                        base::platform::windows::sync_cpu_usage(Some(avg));
+                        since_sync = 0;
+                    } else {
+                        since_sync += 1;
+                    }
                 }
                 prev = cur;
             }

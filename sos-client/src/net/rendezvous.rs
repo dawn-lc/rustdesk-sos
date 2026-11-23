@@ -90,7 +90,10 @@ pub async fn run(
     let mut iteration = 0u64;
     loop {
         iteration += 1;
-        log::info!("[RENDEZVOUS] iteration #{} start", iteration);
+        // 纯结构性的循环行进 trace：`-d` 打开的是 info（`app::run` 里 debug→info /
+        // 默认 warn），所以 trace 不会出现在任何日志里；安静时 5 秒一轮会有 4 行、
+        // 一天七万行，把「收到什么消息」这类真正有用的行淹掉。
+        log::trace!("[RENDEZVOUS] iteration #{} start", iteration);
         // 定时重新注册（心跳）
         if last_reg.elapsed() >= reg_interval {
             log::info!("[RENDEZVOUS] heartbeat due, sending RegisterPeer");
@@ -104,7 +107,7 @@ pub async fn run(
         }
 
         // 监听信令消息
-        log::info!(
+        log::trace!(
             "[RENDEZVOUS] waiting for UDP message (timeout={}ms)",
             listen_timeout.as_millis()
         );
@@ -172,13 +175,18 @@ pub async fn run(
             }
             Err(_) => {
                 // 超时，正常循环
-                log::info!(
+                // 空闲是常态。既不能每 5 秒刷一行（一天七万行），也不能完全不记 ——
+                // 这条是「信令循环还活着」的唯一指示。按 1 分钟一条带计数输出。
+                const IDLE_LOG_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+                hbb_common::throttled_log!(
+                    IDLE_LOG_INTERVAL,
+                    info,
                     "[RENDEZVOUS] UDP recv timeout (no data in {}ms)",
                     listen_timeout.as_millis()
                 );
             }
         }
-        log::info!("[RENDEZVOUS] iteration #{} complete", iteration);
+        log::trace!("[RENDEZVOUS] iteration #{} complete", iteration);
     }
 }
 

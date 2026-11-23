@@ -168,8 +168,9 @@ pub async fn run() -> ResultType<()> {
     //      也没有「查询句柄泄漏就永久失效」这类失效模式；
     //   2. 上游实现把结果放在全局队列里，还需要额外的补种线程。
     //
-    // 采样周期仍为 2 秒，并继续把结果同步进上游缓存，
-    // 保证任何依赖 `cpu_uage_one_minute()` 的代码行为不变。
+    // 采样周期仍为 2 秒，并继续把结果同步进上游缓存（按 10 秒一次，见
+    // `app::cpu::SYNC_INTERVAL_SAMPLES`：上游每次同步都打一条 INFO），
+    // 保证任何依赖 `cpu_uage_one_minute()` 的代码行为不变（它的过期判据是 30s）。
     #[cfg(windows)]
     crate::app::cpu::start_cpu_monitor();
 
