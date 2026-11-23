@@ -7,3 +7,5 @@ pub mod rtt;
 pub mod rendezvous;
 /// WebRTC 入站：控制端走 WebRTC 传输时的 answerer 与 ICE 路由。
 pub mod webrtc_in;
+/// UDP 打洞 + KCP 入站（`PunchHole.udp_port > 0`）。
+pub mod kcp_in;

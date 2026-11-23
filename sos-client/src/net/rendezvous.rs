@@ -598,6 +598,14 @@ async fn handle_punch_hole(
         .await;
     }
 
+    // 控制端要求 UDP 打洞时走 KCP（上游 `punch_udp = !relay_v4 && udp_port > 0`）。
+    // 它在 WebRTC 之前判定，与上游 `handle_punch_hole` 的分支顺序一致：两者同时出现时
+    // 以 udp_port 为准。
+    if crate::net::kcp_in::is_udp_punch(&ph) {
+        return crate::net::kcp_in::serve(ph.clone(), config.clone(), password_refresh_tx.clone())
+            .await;
+    }
+
     // WebRTC 会话不做 TCP 打洞：控制端要留着它的请求 socket 收 trickle 候选，
     // 而 answer 走一条独立的加密 TCP 回给 hbbs（默认部署下信令通道是 UDP，hbbs 对
     // 到达 UDP 的 PunchHoleSent 会按 UDP 打洞语义处理源地址，不能复用）。
@@ -644,9 +652,6 @@ async fn send_punch_hole_sent_webrtc(
     config: &SosConfig,
     webrtc_sdp_answer: String,
 ) -> ResultType<()> {
-    use hbb_common::protobuf::Enum;
-    use hbb_common::rendezvous_proto::PunchHoleSent;
-
     let host = check_port(
         &config.rendezvous_server,
         crate::app::constants::RENDEZVOUS_PORT,
@@ -658,19 +663,12 @@ async fn send_punch_hole_sent_webrtc(
     )
     .await?;
 
-    let our_nat =
-        NatType::from_i32(crate::app::config::get_nat_type()).unwrap_or(NatType::UNKNOWN_NAT);
     let mut msg = RendezvousMessage::new();
-    msg.set_punch_hole_sent(PunchHoleSent {
-        socket_addr: ph.socket_addr.clone(),
-        id: config.id.clone(),
-        relay_server: ph.relay_server.clone(),
-        nat_type: our_nat.into(),
-        version: crate::app::constants::VERSION.to_string(),
-        socket_addr_v6: ph.socket_addr_v6.clone(),
+    msg.set_punch_hole_sent(crate::net::kcp_in::make_punch_hole_sent(
+        ph,
+        config,
         webrtc_sdp_answer,
-        ..Default::default()
-    });
+    ));
     stream.send(&msg).await?;
     log::info!("[CONN] PunchHoleSent（含 WebRTC answer）已通过加密通道发回");
     Ok(())

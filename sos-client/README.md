@@ -341,7 +341,7 @@ rustdesk-sos.exe -m hbbs.example.com
 | TCP 打洞（直连） | 支持 | `net::rendezvous::handle_punch_hole` → `punch_tcp_and_serve`，先 IPv4 再 IPv6 |
 | TCP 中继 | 支持 | 打洞不适用（对称 NAT / `force_relay`）或失败时改走 hbbr |
 | **WebRTC** | 支持 | `net::webrtc_in`，UDP 上的 DTLS 通道，见下 |
-| UDP 打洞（KCP） | 未实现 | 依赖上游私有的 `mod kcp_stream`，见 AGENTS §11 |
+| **UDP 打洞（KCP）** | 支持 | `net::kcp_in`，打通后数据走 KCP，见下 |
 
 #### WebRTC 入站流程
 
@@ -379,6 +379,25 @@ rustdesk-sos.exe -m hbbs.example.com
    比对（`dtls_fingerprint_bound`），不一致说明 SDP 途中被换过，它会直接拒绝 —— 这
    正是防止信令服务器/中继替换指纹的机制，不能省。
 
+#### UDP 打洞（KCP）
+
+控制端也可以要求走 UDP：`PunchHole.udp_port > 0` 就是它的意愿表达，此时本端按
+`net::kcp_in` 的流程打洞，打通后数据走 KCP（UDP 上的可靠有序传输）：
+
+1. 新建一个直连 hbbs 的 UDP socket，**从它**发出 `PunchHoleSent`；
+2. hbbs 对这个包做**源地址观测**，从包的源地址学到本端 NAT 映射，再转告控制端来打这个洞
+   —— 所以这条包必须来自打洞用的同一个 socket。走中转的 UDP 信令通道会让 hbbs
+   学到另一个端口，洞就白打了；
+3. 重发两次（随机 10–30ms）：第一次常落在还没建立的映射上；
+4. `connect(peer)` + 双向探针（`librustdesk::common::punch_udp`）打开两侧 NAT；
+5. `KcpStream::accept` 等控制端的 KCP SYN，拿到 `Stream` 后交给会话层。
+
+打洞是「能通就快、不通就回退」，所以它失败只记日志，不影响这条连接的其它传输。
+同时在飞的打洞数上限为 2（`net::kcp_in::MAX_UDP_PUNCHES`），超限直接放弃而不是排队。
+
+> 这条路径需要上游把 `src/lib.rs` 的 `mod kcp_stream` 公开成 `pub mod`（本项目第 4 处
+> 上游补丁，见 AGENTS §1）。`librustdesk::common::punch_udp` 上游本来就是公开的。
+
 另有两条与上游一致的取舍：`force_relay` 单独出现时按 Relay-only 处理（除非 offer 信封
 里声明 `ice_policy: all`），而 Relay-only 需要 TURN 服务器（`WebRTCStream::has_turn_server`），
 没有就拒答、让控制端走别的传输；代理模式下不答 WebRTC（ICE 会绕过代理暴露真实 IP）。
@@ -392,6 +411,9 @@ rustdesk-sos.exe -m hbbs.example.com
 | `[WEBRTC] ICE connected, handing the session over` | ICE 打通，交给会话层 |
 | `[WEBRTC] wait_connected failed` | 没打通（候选/TURN/防火墙问题），控制端会回退 |
 | `[WEBRTC] duplicate offer` | 重试命中缓存，正常 |
+| `[KCP] PunchHoleSent sent from ...` | UDP 打洞包已从打洞 socket 发出 |
+| `[KCP] KCP session established` | KCP 打通，交给会话层 |
+| `[KCP] declined a UDP punch` | 并发超限，本次放弃（控制端会回退） |
 
 > **端到端验证需要控制端主动选 WebRTC**：把控制端的传输方式设成 WebRTC 再连一次，
 > 日志里应能看到上面第 1、2、3 行依次出现。只有实在连不上时才会回退 TCP/中继。
