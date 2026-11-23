@@ -88,6 +88,23 @@ pub fn viable(ph: &PunchHole) -> bool {
     true
 }
 
+/// 拒答理由（仅在 `viable()` 为 false 且控制器确实发了 offer 时有意义）。
+///
+/// 没有这行日志时，「控制器没发 offer」和「发了但因策略拒答」在日志里长得一模一样 ——
+/// 实测排查时全靠猜。
+pub fn decline_reason(ph: &PunchHole) -> &'static str {
+    if ph.webrtc_sdp_offer.is_empty() {
+        return "no offer in the request";
+    }
+    if hbb_common::config::Config::is_proxy() {
+        return "proxy mode: ICE would leak the real IP";
+    }
+    if relay_only(ph) && !WebRTCStream::has_turn_server() {
+        return "offer is Relay-only (force_relay without ice_policy=all) and no TURN server is configured";
+    }
+    ""
+}
+
 /// 为一条 PunchHole 建 answerer，返回要塞进 `webrtc_sdp_answer` 的 SDP。
 ///
 /// 失败或无资格作答时返回空串（调用方据此让控制端回退到别的传输），不返回错误：

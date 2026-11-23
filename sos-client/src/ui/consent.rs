@@ -69,6 +69,11 @@ pub enum Decision {
     Accepted,
     /// 用户点了「拒绝」，或关掉了窗口
     Rejected,
+    /// 弹窗被 `cancel_pending()` 收掉（控制端已断开，或它的密码先通过了）。
+    ///
+    /// **不是用户的决定**：日志里与 `Rejected` 分开记，否则排查时会把「对端走了」
+    /// 读成「本机用户拒绝了」。
+    Cancelled,
     /// 超时无人操作
     TimedOut,
     /// 已有一个确认窗在等待，本次直接拒绝（防止并发请求堆出弹窗风暴）
@@ -129,6 +134,11 @@ pub async fn confirm(peer: PeerHint) -> Decision {
 /// 池占满），直接拒绝并让对端看到明确原因。
 static GATE: Mutex<()> = Mutex::new(());
 
+/// 本次弹窗是否被 `cancel_pending()` 收掉。
+///
+/// 用来把「取消」和「用户点拒绝」区分开：两者都走 `IDCANCEL`，但语义完全不同。
+static CANCELLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// 当前确认窗的 HWND（0 = 没有）。
 ///
 /// 只用于 `cancel_pending`：从任意线程给窗口投一条「拒绝」，让阻塞在消息循环里的
@@ -146,7 +156,8 @@ pub fn cancel_pending() {
         return;
     }
     let hwnd = HWND(hwnd as *mut core::ffi::c_void);
-    log::info!("[CONSENT] cancelling the pending approval dialog (peer gone)");
+    log::info!("[CONSENT] cancelling the pending approval dialog");
+    CANCELLED.store(true, Ordering::Release);
     unsafe {
         let _ = PostMessageW(
             Some(hwnd),
@@ -175,6 +186,7 @@ fn show(peer: PeerHint) -> Decision {
         }
     };
 
+    CANCELLED.store(false, Ordering::Release);
     let decision = match unsafe { run_dialog(&peer) } {
         Ok(d) => d,
         Err(e) => {
@@ -703,6 +715,12 @@ unsafe extern "system" fn consent_window_proc(
 unsafe fn resolve(hwnd: HWND, decision: Decision) {
     let state = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut DialogState;
     if !state.is_null() && (*state).decided.is_none() {
+    // 取消走的是和「拒绝」同一个 IDCANCEL，靠标记区分语义
+    let decision = if decision == Decision::Rejected && CANCELLED.load(Ordering::Acquire) {
+        Decision::Cancelled
+    } else {
+        decision
+    };
         (*state).decided = Some(decision);
     }
     let _ = DestroyWindow(hwnd);
@@ -763,6 +781,7 @@ mod tests {
         assert!(Decision::Accepted.is_accepted());
         for d in [
             Decision::Rejected,
+            Decision::Cancelled,
             Decision::TimedOut,
             Decision::Busy,
             Decision::Unavailable,

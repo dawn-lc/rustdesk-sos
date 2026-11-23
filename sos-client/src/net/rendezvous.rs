@@ -541,12 +541,16 @@ async fn handle_punch_hole(
     // 之前用 `String::from_utf8_lossy` 解出来是一堆乱码，必然连不上。
     let peer_addr = hbb_common::AddrMangle::decode(&ph.socket_addr);
     let peer_addr_v6 = hbb_common::AddrMangle::decode(&ph.socket_addr_v6);
+    // 这一行要能回答「控制器到底请求了哪条传输」：udp_port>0 = 要 UDP，
+    // webrtc_offer>0 = 要 WebRTC，两者都为 0 = 普通 TCP。排查时先看这里。
     log::info!(
-        "[CONN] >>> handle_punch_hole: peer={} peer_v6={} relay='{}' force_relay={}",
+        "[CONN] >>> handle_punch_hole: peer={} peer_v6={} relay='{}' force_relay={} udp_port={} webrtc_offer={}B",
         peer_addr,
         peer_addr_v6,
         ph.relay_server,
-        ph.force_relay
+        ph.force_relay,
+        ph.udp_port,
+        ph.webrtc_sdp_offer.len()
     );
 
     if is_duplicate_punch(peer_addr) {
@@ -568,11 +572,20 @@ async fn handle_punch_hole(
     // 控制端要用 WebRTC 时，SDP answer 必须随 PunchHoleSent / RelayResponse 一起
     // 回给对端，所以要在下面两条分支之前建好。答不出来就是空串 —— 对端会自行
     // 回退到 TCP 打洞或中继。
-    let webrtc_answer = if crate::net::webrtc_in::viable(&ph) {
-        log::info!("[CONN] WebRTC offer received, building SDP answer...");
+    let webrtc_answer = if ph.webrtc_sdp_offer.is_empty() {
+        String::new()
+    } else if crate::net::webrtc_in::viable(&ph) {
+        log::info!(
+            "[CONN] WebRTC offer received ({} bytes), building SDP answer...",
+            ph.webrtc_sdp_offer.len()
+        );
         crate::net::webrtc_in::answer(ph.clone(), config.clone(), password_refresh_tx.clone())
             .await
     } else {
+        log::warn!(
+            "[CONN] WebRTC offer declined: {}",
+            crate::net::webrtc_in::decline_reason(&ph)
+        );
         String::new()
     };
 
@@ -602,6 +615,7 @@ async fn handle_punch_hole(
     // 它在 WebRTC 之前判定，与上游 `handle_punch_hole` 的分支顺序一致：两者同时出现时
     // 以 udp_port 为准。
     if crate::net::kcp_in::is_udp_punch(&ph) {
+        log::info!("[KCP] UDP punch requested (udp_port={}), trying KCP...", ph.udp_port);
         return crate::net::kcp_in::serve(ph.clone(), config.clone(), password_refresh_tx.clone())
             .await;
     }

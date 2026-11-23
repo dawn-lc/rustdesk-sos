@@ -86,6 +86,9 @@ pub async fn handle(
 
     let mut login_attempts = 0;
     const MAX_LOGIN_ATTEMPTS: u32 = 5;
+    // 等控制端发 LoginRequest 的上限。实测过一次「0.16 秒就报 60 秒超时」的日志：
+    // `next_timeout` 把「超时」和「对端关闭」都归成 None，不看耗时就分不开。
+    const WAIT_LOGIN_MS: u64 = 60_000;
 
     // 授权路径与上游 `approve-mode=both` 一致：**密码正确** 或 **本机用户点「同意」**，
     // 两条路径谁先完成谁生效。密码没通过时弹窗就已经出现，而此时控制端还停在它自己的
@@ -96,14 +99,25 @@ pub async fn handle(
             "[AUTH] waiting for LoginRequest (attempt {})",
             login_attempts + 1
         );
-        let login_data = match stream.next_timeout(60_000).await {
+        let wait_started = std::time::Instant::now();
+        let login_data = match stream.next_timeout(WAIT_LOGIN_MS).await {
             Some(Ok(d)) => d,
             Some(Err(e)) => {
                 log::info!("[AUTH] stream error while waiting for login: {}", e);
                 return Ok(());
             }
             None => {
-                log::info!("[AUTH] timeout waiting for login request (60s)");
+                // None 既可能是等满超时，也可能是对端在这期间关掉了流。用耗时区分：
+                // 提前结束就说明控制端自己走了（它重连时常见），不是我们等太久。
+                let waited = wait_started.elapsed();
+                if waited.as_millis() as u64 + 500 < WAIT_LOGIN_MS {
+                    log::info!(
+                        "[AUTH] peer closed before sending LoginRequest ({}ms, not a timeout)",
+                        waited.as_millis()
+                    );
+                } else {
+                    log::info!("[AUTH] timeout waiting for login request ({}s)", WAIT_LOGIN_MS / 1000);
+                }
                 return Ok(());
             }
         };
@@ -116,7 +130,24 @@ pub async fn handle(
             }
         };
         if !login_msg.has_login_request() {
-            log::warn!("[AUTH] message is not a LoginRequest, skipping");
+            // 记下前几个字节：没有它就只能看到「不是 LoginRequest」，无法判断
+            // 是对端发错了、还是协议里别的消息（例如保活空包）撞进了登录窗口。
+            let head: String = login_data
+                .iter()
+                .take(12)
+                .map(|b| format!("{:02x}", b))
+                .collect();
+            // union 的 Debug 就是变体名（可能带内容），按字符截断避免切开 UTF-8。
+            let what: String = format!("{:?}", login_msg.union)
+                .chars()
+                .take(120)
+                .collect();
+            log::warn!(
+                "[AUTH] message is not a LoginRequest ({} bytes, head={}, union={}), skipping",
+                login_data.len(),
+                head,
+                what
+            );
             continue;
         }
 
