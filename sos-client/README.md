@@ -395,6 +395,22 @@ rustdesk-sos.exe -m hbbs.example.com
 打洞是「能通就快、不通就回退」，所以它失败只记日志，不影响这条连接的其它传输。
 同时在飞的打洞数上限为 2（`net::kcp_in::MAX_UDP_PUNCHES`），超限直接放弃而不是排队。
 
+#### 为什么同一内网里测不到 WebRTC / UDP
+
+实测确认过：如果控制端与被控端在**同一个内网**（同公网出口 / 同网段），hbbs 会把这一轮
+判定为「本地」，直接回 `PunchHoleResponse.is_local = true`（这个字段只存在于
+hbbs→控制端的响应里，被控端根本看不到），**不再把 `PunchHole` 转发给被控端**。
+
+于是被控端日志里只会出现 `FetchLocalAddr`（控制端要内网地址）和 `RequestRelay`
+（内网地址连不上就回退中继），**永远不会有 `message type=PunchHole`** —— 而 WebRTC 的
+SDP offer 与 UDP 打洞的 `udp_port` 都挂在 `PunchHole` 里，所以这两条传输在
+同内网场景下根本不会被触发。判据就是 `handle_punch_hole` 那行入口日志有没有出现，
+以及其中的 `udp_port` / `webrtc_offer`。
+
+要验证这两条传输，控制端必须来自**另一个网络**（不同公网 IP），并且控制端设置里
+关了「总是使用中继」、开着对应的直连传输。另外本机若是对称 NAT，打洞本身也不会成功
+（会正常回退中继）；WebRTC 在这种情况下需要配 TURN 服务器。
+
 > 这条路径需要上游把 `src/lib.rs` 的 `mod kcp_stream` 公开成 `pub mod`（本项目第 4 处
 > 上游补丁，见 AGENTS §1）。`librustdesk::common::punch_udp` 上游本来就是公开的。
 
