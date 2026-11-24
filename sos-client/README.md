@@ -539,6 +539,10 @@ best/low/自定义时，第一次连上仍是 Balanced，动一次画质菜单�
    200 Mbps 完全正常（`tests/hw_bitrate_limit` 有记录）—— 属驱动相关失败，查表算不出来。
    探测放在**可用性发布之后**跑，不会推迟「硬件编码什么时候生效」；测完之前不做钳制，
    真遇到吃不下时创建编码器会自动减半重试，并把失败点记下来压低后续上限。
+   可用性探测本身也会撞上坏窗口（锁屏 / RDP / UAC 正在切换的那一两秒），所以最低几档
+   失败要**重试 3 次、间隔 300ms**，三次全失败才判这个编码器不可用 —— 否则现场会出现
+   「同一次启动里 h264_qsv 好好的、hevc_qsv 却报 rejected even 1000kbps」，
+   于是一整场会话都退到软件编码。
 
 **自定义画质 = 用户自己权衡，QoS 完全退出该屏**：
 
@@ -651,7 +655,7 @@ platform/windows.cc  SYSTEM 令牌提升、桌面切换钩子
 xtask/              发布构建助手（编译 → 复制到 dist → UPX 压缩 → 校验）
 tools/              本机工具（不入库）：WMI 诊断脚本、可选的 UPX 副本
 dist/               交付物输出目录（不入库）
-tests/              编码/捕获/QoS/CPU 的实测与回归测试（36 个测试二进制）
+tests/              编码/捕获/QoS/CPU 的实测与回归测试（38 个测试二进制）
 ```
 
 模块名就是路径（`video::vpx`、`ipc::shmem`）。域根与目录**同名同级**（`video.rs` +
@@ -678,7 +682,7 @@ tests/              编码/捕获/QoS/CPU 的实测与回归测试（36 个测�
 
 | 量 | 实测值 |
 | --- | --- |
-| 一次完整构建（含 36 个测试二进制） | **29.1 GB**（deps 24.0 + incremental 3.0 + build 1.5），414 秒 |
+| 一次完整构建（含 38 个测试二进制） | **29.1 GB**（deps 24.0 + incremental 3.0 + build 1.5），414 秒 |
 | 其中 `.pdb` | **73 个 / 约 24 GB** —— 每个测试二进制都链接了整个 `librustdesk` + WebRTC + FFmpeg 栈，单个 PDB 约 430 MB |
 | 最大的单个文件 | `librustdesk.lib` 3.1 GB（MSVC 的 import library 也带 debuginfo）、`liblibrustdesk.rlib` 1.1 GB |
 | 重构期间实测峰值 | **148.8 GB / 72336 个文件**：deps 93（pdb 72.6 + rlib 7.8 + exe 6.0 + lib 3.0）+ incremental 50.5（960 个会话目录，同一 crate 有几十个不同 hash）+ build 4.7 |
@@ -689,7 +693,7 @@ tests/              编码/捕获/QoS/CPU 的实测与回归测试（36 个测�
 1. **debuginfo 太大**：debug 构建带完整 DWARF，而本项目的依赖树是整个 rustdesk +
    WebRTC + 静态 FFmpeg。每个测试二进制因此都有 ~430 MB 的 PDB。
 2. **cargo 只加不减**：`deps/` 与 `incremental/` 都按 hash 累积，旧产物只能靠 `cargo clean`
-   回收。改一次 `src/` 就会重链 36 个测试二进制（新一代 ~29 GB），大重构做几十轮就上百 GB。
+   回收。改一次 `src/` 就会重链 38 个测试二进制（新一代 ~29 GB），大重构做几十轮就上百 GB。
 
 处理方式：
 

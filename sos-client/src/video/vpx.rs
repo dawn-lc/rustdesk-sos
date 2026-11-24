@@ -634,6 +634,8 @@ impl SosVpxConfig {
                 // 等于二次放大用户的显式意图：现场 2000% 档（40x）被乘成 80x，算出
                 // 200 Mbps 直接打崩硬件编码器（`incompatible video parameters (-14)`）。
                 // 自定义值的语义是「我就要这个码率」，QoS 不该再动它。
+                // 生产路径现在让自定义画质改走 bitrate_kbps_exact，这道判断留作二道防线，
+                // 防止将来有人把自定义 ratio 又喂回这里。
                 let gain = if Self::is_standard_tier(ratio) {
                     Self::GOOD_LINK_BITRATE_GAIN
                 } else {

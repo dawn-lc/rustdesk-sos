@@ -107,7 +107,7 @@ sos-client/
 │   │   └── consent.rs    连接确认弹窗
 │   └── bindings/
 │       └── vpx_ffi.h     bindgen 的输入，只声明用到的 libvpx 符号
-├── tests/                36 个集成测试二进制；support/ 是共用内容生成器（非测试目标）
+├── tests/                38 个集成测试二进制；support/ 是共用内容生成器（非测试目标）
 ├── vcpkg/ffmpeg/         FFmpeg overlay port（官方 7.1.2 + 上游两个 AMF 补丁）
 ├── vendor/hwcodec/       hwcodec 本地副本（只改「调优项失败」不再致命）
 ├── xtask/                发布构建工具，自带 `[workspace]`，零依赖
@@ -230,7 +230,7 @@ sos_vpx;`，直接链接库，于是按域分层：
 3. **测试必须带绝对 `--manifest-path`，且不要先 `cd`。**
    `cargo test --manifest-path d:\code\rustdesk\sos-client\Cargo.toml`。
    `Set-Location`/`cd` 会被某些工具链**静默剥掉**，于是 `--manifest-path Cargo.toml`
-   解析成仓库根的清单 —— 跑的是上游 `rustdesk` 的 225 个单测，而不是 SOS 的 36 个
+   解析成仓库根的清单 —— 跑的是上游 `rustdesk` 的 225 个单测，而不是 SOS 的 38 个
    测试二进制。判据：输出里的 `Running` 行应是 `target\debug\deps\` 下带
    `rustdesk_sos` / `vpx_*` / `qos_*` 等名字，且 target 目录是 `sos-client\target`。
 
@@ -262,14 +262,13 @@ sos_vpx;`，直接链接库，于是按域分层：
 }
 ```
 
-`rust-analyzer analysis-stats` 实测：`Database loaded 9.7s / 2.6GB`、
-`Item Tree Collection 57s / 11.8GB`、依赖 2856 万行 —— SOS 经
-`rustdesk = { path = ".." }` 依赖整个根 crate，**很重是正常的**，不是卡住。
+SOS 经 `rustdesk = { path = ".." }` 依赖整个根 crate（连 WebRTC + 静态 FFmpeg），
+rust-analyzer 又慢又吃内存（实测 11.8 GB）**是正常的**，不是卡住。
 `sos-client/target` 已放进 `files.watcherExclude`。
 
 ### `target/debug` 会疯涨（实测峰值 148.8 GB）
 
-一次完整构建（含 36 个测试二进制）就 **29.1 GB**，cargo 还不回收历史 hash 产物，
+一次完整构建（含 38 个测试二进制）就 **29.1 GB**，cargo 还不回收历史 hash 产物，
 大重构做几十轮就过百 GB。清理命令、成因分析与防复发选项见
 [`README.md`](README.md)「清理 debug 产物」一节。
 
@@ -356,9 +355,8 @@ sos_vpx;`，直接链接库，于是按域分层：
 `Frame::to(yuvfmt)` → `video::vpx::SosVpxEncoder` → `Conn::send`。
 
 - 只**读取**上游的少量公开 API（`make_display_changed_msg`、`VideoSource`、
-  `restore_resolutions` 等），**不改**它的实现。早期曾在
-  `src/server/video_service.rs` 里塞过 `CUSTOM_CAPTURER_FACTORY` 注入点，已随
-  自建链路成熟而退场（见 §1 的退场记录）——**该文件现在与上游完全一致**。
+  `restore_resolutions` 等），**不改**它的实现（早期注入点已退场，见 §1 的
+  退场记录；`video_service.rs` 现在与上游完全一致）。
 - `#[cfg(not(sos_vpx))]` 的「回退上游 video_service」分支**编译不过**（`net::connection`
   无条件引用 `video` 的 `vpx`/`hwenc`/`qos` 子模块），已换成 `src/lib.rs` 里的
   `compile_error!`。缺 libvpx 时构建直接给出明确原因，不要复活那条分支。
@@ -395,6 +393,10 @@ ConnectionRefused = 降档；其余 = 重建（连续 5 次才降档）。
 连接帧率独立自适应：降 ×3/4（每 `BAD_SAMPLES_TO_REDUCE=2` 个拥塞样本），
 升 ×5/4+1（每样本）。**只由排队延迟驱动**（`queue ≥ 40ms`），RTT 高但无排队
 （卫星链路）不降帧。
+
+**自定义画质（协议三档之外）QoS 完全退出**：码率只按 `ratio` 折算
+（`bitrate_kbps_exact`），帧率恒为 `custom_fps`。两者**必须同时**退出 ——
+只锁码率而继续降帧会让每帧变大→排队更久（实测 rtt 35→451ms）。
 
 ---
 
@@ -439,8 +441,8 @@ ConnectionRefused = 降档；其余 = 重建（连续 5 次才降档）。
 ### 硬件编码（H.264/H.265）
 
 - **`hwcodec` 是默认 feature**（`sos-client/Cargo.toml` 的 `default = ["hwcodec"]`）：
-  普通 `cargo xtask` 出的就是带硬件编码的版本，产物约 29.4 MB（压缩前）/ 7~8 MB（UPX）。
-  要回到纯软件、不依赖 FFmpeg 静态库的小体积版本用 `--no-default-features`（13.6 MB）。
+  普通 `cargo xtask` 出的就是带硬件编码的版本（约 28.6 MB，UPX 后 9.1 MB）。
+  纯软件、不依赖 FFmpeg 静态库的小体积版本用 `--no-default-features`（13.6 MB）。
   关闭时 `video::hwenc` 走一个**同 API 的桩**，所以上层（`video`/`net::connection`）
   两种配置下是同一份代码，不需要 `#[cfg]`。
 - **上游的硬件编码只出 H.264/H.265，没有 VP8/VP9**（`hwcodec` 的 `available_encoders` 只枚举
@@ -465,7 +467,7 @@ ConnectionRefused = 降档；其余 = 重建（连续 5 次才降档）。
   不能沿用 `video::vpx` 里 `calc_yuvfmt` 那套「用假指针让 libvpx 反解布局」的做法。
 - **探测结论必须自己缓存**（`video::hwenc` 的 `STATE`）。`Encoder::available_encoders` 会
   **真的逐個建编码器并试编一帧**（实测 2.3s），不缓存就等于每隔几秒重探一次。
-  `available()` 会被 `[VID_FPS]` 这类周期性日志间接调用，所以必须走原子量。
+  `available()` 会被 `[VIDEO:FPS]` 这类周期性日志间接调用，所以必须走原子量。
 - 探测放**后台线程**（`probe_async`），不用上游的子进程模式：上游要 `--check-hwcodec-config`
   子命令，而 SOS 的 clap 会拒绝未知参数，启动路径上还有管理员检查 + 单实例互斥体。
   探测完成前 `available()` 恒 false ⇒ 一律走 VP9，功能不受影响。
@@ -719,7 +721,7 @@ ConnectionRefused = 降档；其余 = 重建（连续 5 次才降档）。
 
 | 字段 | 含义 |
 | --- | --- |
-| `[VID_FPS] encode_out= sent_kbps= sendq= qos_fps= qos_bitrate= codec= rtt= raw=` | 5s 一次。`encode_out` 低**不等于**有问题（画面静止时 `skip` 很高，属正常）；判据看 `edrop` 和 `rtt`。`rtt` 是滤波后喂 QoS 的值，`raw` 是最近原始样本 |
+| `[VIDEO:FPS] encode_out= sent_kbps= sendq= qos_fps= qos_bitrate= codec= rtt= raw=` | 5s 一次。`encode_out` 低**不等于**有问题（画面静止时 `skip` 很高，属正常）；判据看 `edrop` 和 `rtt`。`rtt` 是滤波后喂 QoS 的值，`raw` 是最近原始样本。**`qos_bitrate` 是 QoS 目标值，不是编码器实际生效值**（被网卡/编码器上限钳制，实际值看 `[HWENC] ... clamping` 或 `capturing ... bitrate=`） |
 | `[SOS_PERF] loop= cap= conv= enc= spf= it=` | 分阶段耗时。`loop` 与 `spf` 接近才说明节奏正常；`cap` 占大头 ⇒ GDI 采集是瓶颈，改编码器无效 |
 | `[SOS_DROP] n/m frames dropped (P%) target=Kkbps qos_fps=` | 仅 `edrop>0` 时 5s 一次 |
 | `[VIDEO:PERF] stale=` | 本窗口「重编保留帧」的次数 |
@@ -832,6 +834,6 @@ ConnectionRefused = 降档；其余 = 重建（连续 5 次才降档）。
 | 产物含 WebRTC 栈（+5MB） | 上游把 WebRTC 做成 `Stream` 变体，`drop` 分发到 `close_webrtc()`，链接器无法裁剪。**传输本身已支持**（见 README「接入协议」） |
 | 音频 / 端口转发 / 摄像头 / 隐私模式 / 远程打印 / 终端服务 | 有意移除 |
 | 4 核机上 VP9 1080p 编不到 30fps | 软件编码物理上限；由 `ENC_LEVEL` 逐级降 `cpu-used`，实测不划算才试 VP8 |
-| ~~AMD（AMF）机器上没有硬件 H.264~~ **已修复** | 三层原因叠在一起，缺一层都不行：(1) `hwcodec` 给 AMF 设私有选项 `query_timeout`，**FFmpeg 7.1 已移除该选项** ⇒ `Option not found`；(2) 更关键的是 FFmpeg 侧还要有上游的 `0008-remove-amf-loop-query` 补丁，否则 AMF 的 `QueryOutput` 阻塞轮询会让**试编码超时**（实测 `Encoder h264_amf test attempt 1 returned error: -1`），编码器建得出来但探测判它不可用；(3) `hwcodec` 把「设调优项失败」当致命错误，直接放弃编码器。**上游能用的原因是它自己的 vcpkg overlay 给 FFmpeg 打了这两个补丁**（`res/vcpkg/ffmpeg/patch/0001`、`0008`）。SOS 的做法（全部在 `sos-client/` 内，**上游一行没改**）：`sos-client/vcpkg/ffmpeg/` = 完整 FFmpeg 端口 + 这两个上游补丁（上游 overlay 会 `--disable-swresample`，而 hwcodec 的 `dec.o` 需要 `swr_*`，所以不能直接复用上游 overlay）；`sos-client/vendor/hwcodec/` = 本地副本，把调优项失败降级为警告。实测（Radeon 780M，`tests/hw_vs_sw_bench`，软件侧现已跑**生产** `video::vpx`）：1600x900 VP9 3.43ms → AMF **2.85ms**；1080p 3.93ms → **3.49ms**，`max` 24.3-24.9ms → **9.4-10.8ms**。**旧记录的 9.5/12.0ms 是上游编码器数（它每帧 `flush()`，比生产链路慢一倍多），不能当基准**：8 核机上硬件只快 11%-17%，真正的收益在 4 核机（1080p 软编 24-27ms）与最差帧延迟上。 |
+| ~~AMD（AMF）机器上没有硬件 H.264~~ **已修复** | 三层原因叠在一起，缺一层都不行：(1) `hwcodec` 给 AMF 设私有选项 `query_timeout`，**FFmpeg 7.1 已移除该选项** ⇒ `Option not found`；(2) 更关键的是 FFmpeg 侧还要有上游的 `0008-remove-amf-loop-query` 补丁，否则 AMF 的 `QueryOutput` 阻塞轮询会让**试编码超时**（实测 `Encoder h264_amf test attempt 1 returned error: -1`），编码器建得出来但探测判它不可用；(3) `hwcodec` 把「设调优项失败」当致命错误，直接放弃编码器。上游能用是因为它自己的 vcpkg overlay 给 FFmpeg 打了这两个补丁（`res/vcpkg/ffmpeg/patch/0001`、`0008`）。SOS 全部在 `sos-client/` 内、**上游一行没改**：本地 FFmpeg 端口（含这两补丁）+ 本地 `vendor/hwcodec` 把调优项失败降级为警告。实测（Radeon 780M）：8 核机硬件只快 11%-17%，收益主要在 4 核机（1080p 软编 24-27ms）与最差帧延迟；`max` 24.9→10.8ms。旧记录 9.5/12.0ms 是上游编码器数（每帧 `flush()`），不能当基准。 |
 | 硬件编码没有「编码器内部丢帧」 | 没有 `rc_dropframe_thresh` 的等价物 ⇒ `take_dropped_frames()` 恒 0，拥塞保护只剩发送侧 `MAX_VIDEO_BACKLOG`。`dropframe_thresh_for_link()` 对硬件后端是空转。 |
 | 硬件编码没有「强制 IDR」 | hwcodec 只暴露 `new/encode/set_bitrate` ⇒ `force_keyframe()` 实现为**重建编码器**（新序列首帧必是 IDR），代价是一次编码器初始化。 |
