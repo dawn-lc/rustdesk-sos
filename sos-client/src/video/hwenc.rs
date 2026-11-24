@@ -150,11 +150,14 @@ mod enabled {
         let bad = bad_slot(codec)
             .map(|a| a.load(Ordering::Relaxed))
             .filter(|v| *v > 0);
-        match (ok, bad) {
-            // 失败点比已知可用点更低 ⇒ 以失败点为准（留一格）
-            (Some(ok), Some(bad)) => Some(ok.min(bad.saturating_sub(1))),
+        // 失败点取一半而不是「减一」：请求 200 Mbps 崩掉时，199999 同样会崩，
+        // 减一只会在原地反复失败；减半能立刻落到已知可用的量级（实测 100 Mbps
+        // 能正常出帧），一次重建就恢复画面。
+        let from_bad = bad.map(|v| (v / 2).max(1));
+        match (ok, from_bad) {
+            (Some(ok), Some(bad)) => Some(ok.min(bad)),
             (Some(ok), None) => Some(ok),
-            (None, Some(bad)) => Some(bad.saturating_sub(1)),
+            (None, Some(bad)) => Some(bad),
             (None, None) => None,
         }
     }
@@ -184,12 +187,14 @@ mod enabled {
         }
     }
 
-    /// 某个码率能不能真的用起来：建得出编码器**并且**能编出一帧。
-    fn bitrate_works(name: &str, width: usize, height: usize, kbps: u32) -> bool {
-        let Ok(mut encoder) = SosHwEncoder::build(name, width, height, kbps, 60) else {
-            return false;
-        };
-        // 按编码器自己给的布局造一帧 NV12（Y 有渐变、色度中性），编出去看结果。
+    /// 探测用的「典型工作点」：先在这个码率建编码器，再切到待测码率。
+    ///
+    /// 取典型值而不是最低值，是因为要测的是**运行中切码率**这条路径 ——
+    /// 从 2 Mbps 直接跳到目标值，与生产里「用户改画质」的情形一致。
+    const PROBE_REFERENCE_KBPS: u32 = 2_000;
+
+    /// 按编码器自己给的布局造一帧 NV12（Y 有渐变、色度中性）。
+    fn probe_frame(encoder: &Encoder, width: usize, height: usize) -> Vec<u8> {
         let stride_y = encoder.linesize[0] as usize;
         let stride_uv = *encoder.linesize.get(1).unwrap_or(&(stride_y as i32)) as usize;
         let end_u = encoder.offset[0] as usize + stride_uv * (height / 2).max(1);
@@ -201,7 +206,42 @@ mod enabled {
                 buf[dst..dst + width].fill((row % 251) as u8);
             }
         }
-        encoder.encode(&buf, 33).is_ok()
+        buf
+    }
+
+    /// 某个码率能不能真的用起来。
+    ///
+    /// **必须测「切码率」而不是「按目标码率建编码器」**：现场实测（hevc_qsv + 1080p）
+    /// 按 200 Mbps 建编码器完全正常、能连续出帧，但从 100 Mbps `set_bitrate` 到 200 Mbps
+    /// 之后的第一帧就崩：
+    ///
+    /// ```text
+    /// [HWENC] hevc_qsv 1920x1080 100000kbps        ← 建起来了，正常出帧
+    /// [VIDEO] display #0 ratio 40.00 ... -> bitrate 200000kbps
+    /// [ERROR] Error during resetting: incompatible video parameters (-14)
+    /// [ERROR] [FFMPEG_RAM_ENC] avcodec_send_frame failed, ret = Invalid argument
+    /// ```
+    ///
+    /// 只测「建得出」的探测因此会给出 200 Mbps「可用」的错误结论，等于没防住。
+    fn bitrate_works(name: &str, width: usize, height: usize, kbps: u32) -> bool {
+        if kbps == PROBE_REFERENCE_KBPS {
+            return true;
+        }
+        let Ok(mut encoder) =
+            SosHwEncoder::build(name, width, height, PROBE_REFERENCE_KBPS, 60)
+        else {
+            return false;
+        };
+        if encoder.encode(&probe_frame(&encoder, width, height), 33).is_err() {
+            return false;
+        }
+        if encoder.set_bitrate(kbps as i32).is_err() {
+            return false;
+        }
+        // 真正的判据：切完之后还能不能出帧（现场崩在 send_frame，不在 set_bitrate）
+        encoder
+            .encode(&probe_frame(&encoder, width, height), 66)
+            .is_ok()
     }
 
     /// 二分搜索该编码器能吃下的最高码率，成功后写入 [`Self::max_bitrate_kbps`] 的状态。
@@ -477,10 +517,13 @@ mod enabled {
         }
 
         pub fn encode(&mut self, yuv: &[u8], ms: i64) -> ResultType<Vec<(Vec<u8>, bool)>> {
-            let frames = self
-                .encoder
-                .encode(yuv, ms)
-                .map_err(|code| anyhow::anyhow!("hw encode failed: {}", code))?;
+            let frames = self.encoder.encode(yuv, ms).map_err(|code| {
+                // `set_bitrate` 可能返回成功、之后第一帧才崩（现场就是这样），
+                // 所以运行期失败也要记一笔：上限会被压到当前码率的一半，
+                // 重建后直接落在可用量级，不用一轮轮试。
+                record_rejected_kbps(self.codec, self.kbps);
+                anyhow::anyhow!("hw encode failed: {}", code)
+            })?;
             Ok(frames
                 .iter()
                 .map(|f| (f.data.clone(), f.key == 1))
