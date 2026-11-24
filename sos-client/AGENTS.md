@@ -621,8 +621,9 @@ ConnectionRefused = 降档；其余 = 重建（连续 5 次才降档）。
   * 密码错误（`:3083`）→ 回 `Wrong Password` + **也弹窗**（本机用户仍可同意）。
   所以弹窗出现时，控制端**正停在它自己的密码输入框上** —— 两个 UI 并存，这也是上游
   的行为。**没有开关**：SOS 恒走 both 语义，唯一的例外是下面那条「用户看不见就不弹」。
-- 因此 `wait_for_local_approval` 在等弹窗的同时**必须继续读这条连接**：控制端可能
-  正在输密码，输对了就要走密码路径并 `cancel_pending()` 把弹窗收掉。
+- 因此 `wait_for_local_approval` 在等弹窗的同时**必须继续读这条连接**：输对了走密码
+  路径并 `cancel_pending()` 收窗；**输错了也必须回 `Wrong Password`**（与主循环共用
+  `report_wrong_password` —— 漏一处用户就完全无感知）。
 - 上游只在 `approve_mode=Click`（本机没有有效密码）时才回
   `LOGIN_MSG_NO_PASSWORD_ACCESS`（`:3057`）。SOS 恒有密码、走的是 both 语义，
   所以等待期间**不发这条响应** —— 发了会让控制端 `dismissAll` 把密码框换成
@@ -757,8 +758,7 @@ ConnectionRefused = 降档；其余 = 重建（连续 5 次才降档）。
   `vpx_budget` `vpx_screen_content` `periodic_cost` `hw_vs_sw_bench` `vpx_threads`
   `enc_bench` `codec_cost` `gdi_bench` `hw_bitrate_limit`。**新增基准请照此办理**（`#[test]` 下面加
   `#[ignore = "实机基准…"]`），别塞进默认流程。
-- 不少测试是**实机基准**（编码吞吐、内存、采集延迟），数值随机器变化，
-  它们的作用是「同机 A/B 对比」，不要按注释里的绝对数字做断言。
+- 实机基准的数值随机器变化，作用只是「同机 A/B 对比」，不要按注释里的数字断言。
 - **采集类测试都要能在「抓不到帧」的环境里优雅跳过**（锁屏 / 会话断开 / 同一个二进制里
   两个测试抢 DXGI duplication —— 每个输出只允许一个）：
   * 先做**前置探测**（跑几百毫秒动画窗口再试着抓几帧），一帧都抓不到就打印 `[skip]` 后
@@ -832,6 +832,6 @@ ConnectionRefused = 降档；其余 = 重建（连续 5 次才降档）。
 | 产物含 WebRTC 栈（+5MB） | 上游把 WebRTC 做成 `Stream` 变体，`drop` 分发到 `close_webrtc()`，链接器无法裁剪。**传输本身已支持**（见 README「接入协议」） |
 | 音频 / 端口转发 / 摄像头 / 隐私模式 / 远程打印 / 终端服务 | 有意移除 |
 | 4 核机上 VP9 1080p 编不到 30fps | 软件编码物理上限；由 `ENC_LEVEL` 逐级降 `cpu-used`，实测不划算才试 VP8 |
-| ~~AMD（AMF）机器上没有硬件 H.264~~ **已修复** | 三层原因叠在一起，缺一层都不行：(1) `hwcodec` 给 AMF 设私有选项 `query_timeout`，**FFmpeg 7.1 已移除该选项** ⇒ `Option not found`；(2) 更关键的是 FFmpeg 侧还要有上游的 `0008-remove-amf-loop-query` 补丁，否则 AMF 的 `QueryOutput` 阻塞轮询会让**试编码超时**（实测 `Encoder h264_amf test attempt 1 returned error: -1`），编码器建得出来但探测判它不可用；(3) `hwcodec` 把「设调优项失败」当致命错误，直接放弃编码器。上游能用是因为它自己的 vcpkg overlay 给 FFmpeg 打了这两个补丁（`res/vcpkg/ffmpeg/patch/0001`、`0008`）。SOS 全部在 `sos-client/` 内、**上游一行没改**：本地 FFmpeg 端口（含这两补丁）+ 本地 `vendor/hwcodec` 把调优项失败降级为警告。实测（Radeon 780M）：8 核机硬件只快 11%-17%，收益主要在 4 核机（1080p 软编 24-27ms）与最差帧延迟；`max` 24.9→10.8ms。旧记录 9.5/12.0ms 是上游编码器数（每帧 `flush()`），不能当基准。 |
+| ~~AMD（AMF）机器上没有硬件 H.264~~ **已修复** | 三层原因叠在一起，缺一层都不行：(1) `hwcodec` 给 AMF 设私有选项 `query_timeout`，**FFmpeg 7.1 已移除该选项** ⇒ `Option not found`；(2) 更关键的是 FFmpeg 侧还要有上游的 `0008-remove-amf-loop-query` 补丁，否则 AMF 的 `QueryOutput` 阻塞轮询会让**试编码超时**（实测 `Encoder h264_amf test attempt 1 returned error: -1`），编码器建得出来但探测判它不可用；(3) `hwcodec` 把「设调优项失败」当致命错误，直接放弃编码器。上游能用是因为它自己的 vcpkg overlay 给 FFmpeg 打了这两个补丁（`res/vcpkg/ffmpeg/patch/0001`、`0008`）。SOS 全部在 `sos-client/` 内、**上游一行没改**：本地 FFmpeg 端口（含这两补丁）+ 本地 `vendor/hwcodec` 把调优项失败降级为警告。实测（Radeon 780M）：8 核机只快 11%-17%，收益主要在 4 核机；`max` 24.9→10.8ms（旧记录 9.5/12.0ms 是上游每帧 `flush()` 的数，不能当基准）。 |
 | 硬件编码没有「编码器内部丢帧」 | 没有 `rc_dropframe_thresh` 的等价物 ⇒ `take_dropped_frames()` 恒 0，拥塞保护只剩发送侧 `MAX_VIDEO_BACKLOG`。`dropframe_thresh_for_link()` 对硬件后端是空转。 |
 | 硬件编码没有「强制 IDR」 | hwcodec 只暴露 `new/encode/set_bitrate` ⇒ `force_keyframe()` 实现为**重建编码器**（新序列首帧必是 IDR），代价是一次编码器初始化。 |

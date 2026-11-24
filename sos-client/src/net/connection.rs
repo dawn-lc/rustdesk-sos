@@ -87,7 +87,6 @@ pub async fn handle(
     }
 
     let mut login_attempts = 0;
-    const MAX_LOGIN_ATTEMPTS: u32 = 5;
     // 等控制端发 LoginRequest 的上限。实测过一次「0.16 秒就报 60 秒超时」的日志：
     // `next_timeout` 把「超时」和「对端关闭」都归成 None，不看耗时就分不开。
     const WAIT_LOGIN_MS: u64 = 60_000;
@@ -156,39 +155,28 @@ pub async fn handle(
         let login_req = login_msg.login_request();
         let received_h2 = &login_req.password;
 
-        let authorized = password_matches(&config, &salt, &challenge, received_h2);
+        let attempt = classify_login_attempt(&config, &salt, &challenge, received_h2);
         log::debug!(
-            "[AUTH] attempt {} hash match={}",
+            "[AUTH] attempt {} verdict={:?}",
             login_attempts + 1,
-            authorized
+            attempt
         );
-        if authorized {
+        if attempt == LoginAttempt::Accepted {
             log::info!("[AUTH] authorized by password, conn_id={}", conn_id);
             break login_req.clone();
         }
 
         // 密码没通过。空密码说明控制端还停在它自己的密码框上（并不是输错了什么），
         // 不计入失败次数；真输错了才计数。
-        if received_h2.is_empty() {
+        if attempt == LoginAttempt::Empty {
             log::info!(
                 "[AUTH] empty password from {} (controller is at its password prompt)",
                 addr_str
             );
-        } else {
-            login_attempts += 1;
-            log::warn!(
-                "Login authorization failed from {} (attempt {})",
-                addr_str,
-                login_attempts
-            );
-            record_login_failure(&addr_str);
-            // 发送错误消息，不关闭连接（客户端会弹出重试对话框）
-            send_login_error(&mut stream, "Wrong Password").await;
-            if login_attempts >= MAX_LOGIN_ATTEMPTS {
-                log::warn!("Too many login attempts from {}, closing", addr_str);
-                send_close_reason(&mut stream, "Wrong Password").await;
-                return Ok(());
-            }
+        } else if report_wrong_password(&mut stream, &addr_str, &mut login_attempts).await {
+            log::warn!("Too many login attempts from {}, closing", addr_str);
+            send_close_reason(&mut stream, LOGIN_MSG_PASSWORD_WRONG).await;
+            return Ok(());
         }
 
         // 本机用户此刻**看不见**弹窗（锁屏 / UAC 安全桌面 / 会话已断开）：不弹，
@@ -211,6 +199,7 @@ pub async fn handle(
             &config,
             &salt,
             &challenge,
+            &mut login_attempts,
         )
         .await?
         {
@@ -386,6 +375,21 @@ const MAX_VIDEO_BACKLOG: usize = 6;
 /// 累计被丢弃的视频帧数（仅诊断用）
 static DROPPED_VIDEO_FRAMES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// 密码错误的回包字符串。
+///
+/// **必须与上游 `crate::client::LOGIN_MSG_PASSWORD_WRONG`（`src/client.rs:118`）逐字节
+/// 一致**：控制端的 `handle_login_error` 是用 `err == 该常量` 判等来决定「清空缓存密码
+/// 并弹重新输入」的，写错一个字母就落到最后的兜底分支，用户看到的是通用错误而不是
+/// 密码错误提示。上游那个模块是私有的，这里只能复制字面量，靠单测锁定。
+const LOGIN_MSG_PASSWORD_WRONG: &str = "Wrong Password";
+
+/// 单条连接允许的密码错误次数。超过即断开（与上游 `check_failure` 的语义一致）。
+///
+/// 两个调用点共用：登录主循环，以及「等本机用户确认」期间（见
+/// [`report_wrong_password`]）—— 后者也必须计数，否则弹窗等待期就成了不限次数的
+/// 在线爆破窗口。
+const MAX_LOGIN_ATTEMPTS: u32 = 5;
+
 /// 登录失败追踪（指数退避暴力破解防护）
 const BACKOFF_BASE_SECS: u64 = 2; // 2^failures 秒
 const BACKOFF_MAX_SECS: u64 = 1800; // 30 分钟上限
@@ -471,6 +475,36 @@ fn password_matches(config: &SosConfig, salt: &str, challenge: &str, received: &
     received == expected_h2.as_slice()
 }
 
+/// 一次登录尝试的判定结果。
+///
+/// 抽成枚举是因为「该不该回错误」这个判断有**两个**调用点：登录主循环，以及等本机
+/// 用户确认期间控制端补发的密码。两处一旦分叉就会出现「第一次输错有提示、之后完全
+/// 没反应」这种现场缺陷（本枚举就是为了让这类分叉不可能发生）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LoginAttempt {
+    /// 密码正确
+    Accepted,
+    /// 还没有密码：控制端仍停在它自己的密码框上，回错误会打断它
+    Empty,
+    /// 输错了：必须回 `Wrong Password` 让控制端提示重试
+    Wrong,
+}
+
+fn classify_login_attempt(
+    config: &SosConfig,
+    salt: &str,
+    challenge: &str,
+    received: &[u8],
+) -> LoginAttempt {
+    if password_matches(config, salt, challenge, received) {
+        LoginAttempt::Accepted
+    } else if received.is_empty() {
+        LoginAttempt::Empty
+    } else {
+        LoginAttempt::Wrong
+    }
+}
+
 /// 发一条空 `Message` 保活。
 ///
 /// 控制端的 io_loop 有一个 30s「无数据」看门狗（`src/client/io_loop.rs:337`），
@@ -532,6 +566,9 @@ async fn wait_for_local_approval(
     config: &SosConfig,
     salt: &str,
     challenge: &str,
+    // 与控制端登录主循环共享同一个计数器：等待期间输错也要计数，否则弹窗
+    // 等待期就成了不限次数的在线爆破窗口。
+    login_attempts: &mut u32,
 ) -> ResultType<Approval> {
     let hint = crate::ui::consent::PeerHint {
         id: seed.my_id.clone(),
@@ -574,7 +611,9 @@ async fn wait_for_local_approval(
                 if let Ok(msg) = Message::parse_from_bytes(&data) {
                     if msg.has_login_request() {
                         let req = msg.login_request();
-                        if password_matches(config, salt, challenge, &req.password) {
+                        let attempt =
+                            classify_login_attempt(config, salt, challenge, &req.password);
+                        if attempt == LoginAttempt::Accepted {
                             log::info!(
                                 "[AUTH] password accepted while waiting for local approval, conn_id={}",
                                 conn_id
@@ -582,9 +621,25 @@ async fn wait_for_local_approval(
                             crate::ui::consent::cancel_pending();
                             return Ok(Approval::Authorized(req.clone()));
                         }
-                        log::debug!(
-                            "[AUTH] still waiting for local approval (password not accepted)"
-                        );
+                        // 输错了必须回 `Wrong Password`。控制端这时正停在它自己的
+                        // 密码框上，沉默会让用户以为卡死（现场症状：连输错几次完全
+                        // 没有提示，只能干等弹窗超时）。
+                        //
+                        // 空密码不算「输错」：那表示它还在框里没输入，回错误会把
+                        // 刚弹出的输入框打断。
+                        if attempt == LoginAttempt::Empty {
+                            log::debug!(
+                                "[AUTH] still waiting for local approval (no password yet)"
+                            );
+                        } else if report_wrong_password(stream, addr, login_attempts).await {
+                            log::warn!(
+                                "Too many login attempts from {} while waiting for approval, closing",
+                                addr
+                            );
+                            crate::ui::consent::cancel_pending();
+                            send_close_reason(stream, LOGIN_MSG_PASSWORD_WRONG).await;
+                            return Ok(Approval::Denied);
+                        }
                     }
                 }
                 // 其它消息（控制端此时通常只可能在等响应）直接忽略。
@@ -642,6 +697,27 @@ async fn wait_for_local_approval(
     Ok(Approval::Denied)
 }
 
+
+/// 处理一次「密码错」：计数、记频率、回 `Wrong Password`；返回是否已达上限该断开。
+///
+/// 两个调用点（登录主循环、等本机用户确认期间）**必须走同一份逻辑**：任何一处
+/// 漏掉回包，控制端就只能在密码框上干等 —— 现场症状正是「输错密码后没有任何提示」。
+///
+/// 上限定在 [`MAX_LOGIN_ATTEMPTS`]（5）而不是不限：弹窗可能开满 180 秒，等待期若
+/// 不计数，就成了一个不限次数的在线爆破窗口。
+async fn report_wrong_password(stream: &mut Stream, addr: &str, attempts: &mut u32) -> bool {
+    *attempts += 1;
+    log::warn!(
+        "Login authorization failed from {} (attempt {})",
+        addr,
+        *attempts
+    );
+    record_login_failure(addr);
+    // 回错误但**不关连接**：控制端的 `handle_login_error` 收到这个字符串会清空它
+    // 缓存的密码并弹「是否重新输入」，用户可以直接在同一连接上重试。
+    send_login_error(stream, LOGIN_MSG_PASSWORD_WRONG).await;
+    *attempts >= MAX_LOGIN_ATTEMPTS
+}
 
 /// 发送登录错误（不关闭连接，让客户端重试）
 async fn send_login_error(stream: &mut Stream, err: &str) {
@@ -2503,5 +2579,109 @@ mod tests {
     #[test]
     fn does_not_lock_on_abnormal_close() {
         assert!(!should_lock_after_session_end(true, false));
+    }
+
+    /// 密码错误必须**回给控制端一条 `Wrong Password`**，否则它只能停在密码框上干等。
+    ///
+    /// 这条是现场缺陷的回归测试：等待本机用户确认期间收到错误密码时，代码只打了一
+    /// 行 debug 日志、什么也不回，于是「输错密码」在控制端完全无感知。
+    ///
+    /// 用真实的 TCP 一对流来测，是因为要断言的核心就是「对端真的收到了什么」；
+    /// 未加密的 `Stream` 直接发明文 protobuf，对端解析即可。
+    #[tokio::test]
+    async fn wrong_password_is_reported_to_the_peer() {
+        use super::report_wrong_password;
+        use hbb_common::Stream;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = tokio::spawn(async move {
+            let s = tokio::net::TcpStream::connect(addr).await.unwrap();
+            (s, addr)
+        });
+        let (server_tcp, peer_addr) = listener.accept().await.unwrap();
+        let (mut peer, _) = client.await.unwrap();
+        let mut stream = Stream::from(server_tcp, peer_addr);
+
+        let mut attempts = 0;
+        assert!(
+            !report_wrong_password(&mut stream, "127.0.0.1", &mut attempts).await,
+            "第一次错误不该直接断开"
+        );
+        assert_eq!(attempts, 1);
+
+        // 对端也用 `Stream` 读：`send` 会按 RustDesk 的帧格式（长度前缀）打包，
+        // 裸 TCP 读只能拿到半截，`next()` 才给出一条完整消息。
+        let peer_addr2 = peer.local_addr().unwrap();
+        let mut peer_stream = Stream::from(peer, peer_addr2);
+        let data = peer_stream.next().await.unwrap().unwrap();
+        use hbb_common::protobuf::Message as _;
+        let msg = base::protos::message::Message::parse_from_bytes(&data).unwrap();
+        assert!(msg.has_login_response(), "对端应收到 LoginResponse");
+        // `error` 是 oneof 的变体，必须按 union 匹配；控制端也是这么读的
+        // （`src/client/io_loop.rs:1751` 的 `Some(login_response::Union::Error(err))`）。
+        let err = match &msg.login_response().union {
+            Some(base::message_proto::login_response::Union::Error(e)) => e.clone(),
+            other => panic!("对端应收到 error 变体，实际是 {:?}", other),
+        };
+        assert_eq!(
+            err,
+            super::LOGIN_MSG_PASSWORD_WRONG,
+            "错误码必须是控制端 handle_login_error 认识的那个字符串"
+        );
+    }
+
+    /// 三个判定必须互斥且覆盖全：正确 / 没输（空）/ 输错。
+    ///
+    /// 这条锁的是「该不该回 `Wrong Password`」：只有 `Wrong` 才回。空密码表示控制端
+    /// 还停在它自己的密码框上，回错误会把刚弹出的输入框打断。
+    #[test]
+    fn classifies_login_attempts_for_both_call_sites() {
+        use super::{classify_login_attempt, LoginAttempt};
+        let cfg = config_with_password("s3cret");
+        let salt = "saltsaltsalt";
+        let challenge = "abc123";
+
+        assert_eq!(
+            classify_login_attempt(&cfg, salt, challenge, &h2("s3cret", salt, challenge)),
+            LoginAttempt::Accepted
+        );
+        assert_eq!(
+            classify_login_attempt(&cfg, salt, challenge, &h2("wrong", salt, challenge)),
+            LoginAttempt::Wrong
+        );
+        // 空密码不是「输错」，不该触发错误回包
+        assert_eq!(
+            classify_login_attempt(&cfg, salt, challenge, &[]),
+            LoginAttempt::Empty
+        );
+    }
+
+    /// 错误次数达到上限后必须让调用方断开连接（等待期同样受限，防在线爆破）。
+    #[tokio::test]
+    async fn wrong_password_stops_at_the_limit() {
+        use super::{report_wrong_password, MAX_LOGIN_ATTEMPTS};
+        use hbb_common::Stream;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = tokio::net::TcpStream::connect(addr).await;
+            // 保持连接开着，避免 send 报错影响计数语义
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        });
+        let (server_tcp, peer_addr) = listener.accept().await.unwrap();
+        let mut stream = Stream::from(server_tcp, peer_addr);
+
+        let mut attempts = 0;
+        for _ in 1..MAX_LOGIN_ATTEMPTS {
+            assert!(!report_wrong_password(&mut stream, "127.0.0.1", &mut attempts).await);
+        }
+        assert!(
+            report_wrong_password(&mut stream, "127.0.0.1", &mut attempts).await,
+            "第 {} 次错误应触发断开",
+            MAX_LOGIN_ATTEMPTS
+        );
+        assert_eq!(attempts, MAX_LOGIN_ATTEMPTS);
     }
 }
