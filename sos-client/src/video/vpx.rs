@@ -551,8 +551,27 @@ impl SosVpxConfig {
     pub fn bitrate_kbps_for(width: usize, height: usize, ratio: f32, fps: u32) -> u32 {
         let full = Self::default_bitrate_kbps(width, height) as f32;
         let factor = (fps as f32 / Self::NOMINAL_FPS).clamp(Self::MIN_FPS_FACTOR, 1.0);
-        let cap = super::netspeed::cap_kbps() as f32;
-        (full * ratio * factor).clamp(150.0, cap) as u32
+        Self::clamp_to_cap(full * ratio * factor, 150.0) as u32
+    }
+
+    /// 施加码率上限并保底。
+    ///
+    /// 上限来源有优先级：
+    ///
+    /// 1. **网卡链路速率**（`video::netspeed`）—— 链路能承载多少；
+    /// 2. 网卡速率读不出来时，改用**编码器实测上限**（`video::hwenc`）——
+    ///    这台机器的编码器能产出多少。两者都没有（无网卡信息且探测未完成/无硬件
+    ///    编码器）才不钳制，因为此时任何上限都只能靠猜。
+    ///
+    /// 为什么不准备一个固定常数兜底：常数同样是猜，而且会掩盖「读不到网卡」这个
+    /// 事实。用编码器实测值既准确又自带诊断意义。
+    fn clamp_to_cap(kbps: f32, floor: f32) -> f32 {
+        let cap = super::netspeed::cap_kbps()
+            .or_else(super::hwenc::max_bitrate_kbps_any);
+        match cap {
+            Some(cap) => kbps.clamp(floor, cap as f32),
+            None => kbps.max(floor),
+        }
     }
 
 
@@ -602,8 +621,7 @@ impl SosVpxConfig {
         match budget {
             LinkBudget::Generous => {
                 let full = Self::default_bitrate_kbps(width, height) as f32;
-                let cap = super::netspeed::cap_kbps() as f32;
-                (full * ratio * Self::GOOD_LINK_BITRATE_GAIN).clamp(400.0, cap) as u32
+                Self::clamp_to_cap(full * ratio * Self::GOOD_LINK_BITRATE_GAIN, 400.0) as u32
             }
             LinkBudget::Constrained => Self::bitrate_kbps_for(width, height, ratio, fps),
         }

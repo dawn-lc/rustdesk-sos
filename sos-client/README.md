@@ -532,6 +532,8 @@ best/low/自定义时，第一次连上仍是 Balanced，动一次画质菜单�
    千兆级的码率；启动日志打印 `[BITRATE] link N Mbps -> network cap N kbps`。
 2. **编码器侧**：启动时让编码器自己投票 —— 二分搜索出「建得出**并且**能编出一帧」
    的最高码率，日志打印 `[HWENC] <name> max bitrate probed Nkbps at 1920x1080`。
+   网卡速率读不出来时（`[BITRATE] link speed unreadable`），**由这一侧兜底**；
+   两侧都拿不到值才完全不钳制 —— 不准备固定常数，因为常数同样是猜。
    为什么必须实测：现场一台 QSV 机器在 200 Mbps 时直接
    `incompatible video parameters (-14)` 并把画面卡死，而同一版本在另一台机器上
    200 Mbps 完全正常（`tests/hw_bitrate_limit` 有记录）—— 属驱动相关失败，查表算不出来。

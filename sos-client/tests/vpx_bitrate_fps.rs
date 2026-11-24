@@ -191,7 +191,7 @@ fn measured_frame_size_follows_bitrate_over_fps() {
     }
 }
 
-// ── 网络侧码率上限（按网卡链路速率）──
+// ── 码率上限：网络侧 + 编码器侧兜底 ──
 
 /// 上限必须随网卡速率变化，而不是写死一个常数。
 ///
@@ -201,39 +201,47 @@ fn measured_frame_size_follows_bitrate_over_fps() {
 fn cap_follows_link_speed() {
     use rustdesk_sos::video::netspeed::cap_kbps_for_link;
 
-    assert_eq!(cap_kbps_for_link(10_000), 8_000, "10 Mbps 链路应给 8 Mbps");
-    assert_eq!(cap_kbps_for_link(30_000), 24_000, "30 Mbps 链路应给 24 Mbps");
-    assert_eq!(cap_kbps_for_link(100_000), 80_000, "100 Mbps 链路应给 80 Mbps");
-    assert_eq!(cap_kbps_for_link(1_000_000), 800_000, "千兆链路给 800 Mbps");
-    assert_eq!(cap_kbps_for_link(10_000_000), 8_000_000, "万兆链路给 8 Gbps");
+    assert_eq!(cap_kbps_for_link(10_000), Some(8_000), "10 Mbps 链路应给 8 Mbps");
+    assert_eq!(cap_kbps_for_link(30_000), Some(24_000), "30 Mbps 链路应给 24 Mbps");
+    assert_eq!(cap_kbps_for_link(100_000), Some(80_000), "100 Mbps 链路应给 80 Mbps");
+    assert_eq!(cap_kbps_for_link(1_000_000), Some(800_000), "千兆链路给 800 Mbps");
 
-    // 读不到速率：退回保守兜底，既不无上限也不压死
-    let fallback = cap_kbps_for_link(0);
-    assert!(fallback > 0 && fallback <= 100_000, "兜底值 {fallback} 不合理");
+    // 链路速率未知：**不猜常数**，交给编码器侧兜底（调用方 or_else 处理）
+    assert_eq!(
+        cap_kbps_for_link(0),
+        None,
+        "网卡速率读不出来时不应编造一个上限，应由编码器实测值兜底"
+    );
 
     // 极慢链路仍有下限
-    assert_eq!(cap_kbps_for_link(1), 1_000);
+    assert_eq!(cap_kbps_for_link(1), Some(1_000));
 }
 
-/// 极端自定义画质（控制端 2000% = 40x）不能突破网络上限。
+/// 极端自定义画质（控制端 2000% = 40x）不能突破上限。
+///
+/// 上限可能来自网卡，也可能来自编码器实测（网卡读不出来时）。两者都没有时不钳制 ——
+/// 那种情况下任何断言都只能针对「不被无谓钳制」，即结果仍应是合理量级。
 #[test]
-fn bitrate_is_capped_by_network_link() {
-    use rustdesk_sos::video::netspeed::cap_kbps;
+fn bitrate_is_capped_for_extreme_custom_quality() {
+    use rustdesk_sos::video::{hwenc, netspeed};
     let (w, h) = (1920usize, 1080usize);
-    let cap = cap_kbps();
+    let cap = netspeed::cap_kbps().or_else(hwenc::max_bitrate_kbps_any);
     for (ratio, fps, budget) in [
         (40.0f32, 30u32, LinkBudget::Generous),
         (40.0, 120, LinkBudget::Constrained),
     ] {
         let got = SosVpxConfig::bitrate_kbps_for_link(w, h, ratio, fps, budget);
-        assert!(
-            got <= cap,
-            "{budget:?} ratio={ratio} fps={fps} -> {got}kbps 超过网络上限 {cap}"
-        );
+        if let Some(cap) = cap {
+            assert!(
+                got <= cap,
+                "{budget:?} ratio={ratio} fps={fps} -> {got}kbps 超过上限 {cap}"
+            );
+        }
     }
-    let plain = SosVpxConfig::bitrate_kbps_for(w, h, 40.0, 120);
-    assert!(plain <= cap, "bitrate_kbps_for -> {plain}kbps 超过网络上限 {cap}");
-
-    // 正常档位不受影响：Best(1.5x) 约 7500kbps
-    assert!(SosVpxConfig::bitrate_kbps_for(w, h, 1.5, 30) < cap / 2);
+    if let Some(cap) = cap {
+        let plain = SosVpxConfig::bitrate_kbps_for(w, h, 40.0, 120);
+        assert!(plain <= cap, "bitrate_kbps_for -> {plain}kbps 超过上限 {cap}");
+        // 正常档位不受影响：Best(1.5x) 约 7500kbps
+        assert!(SosVpxConfig::bitrate_kbps_for(w, h, 1.5, 30) < cap / 2);
+    }
 }

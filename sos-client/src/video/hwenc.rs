@@ -159,6 +159,18 @@ mod enabled {
         }
     }
 
+    /// 任一已探测编码器的最高可用码率，用于「网卡速率读不出来」时兜底。
+    ///
+    /// 为什么不用一个常数：那等于再猜一个值。编码器上限是我们**实测**出来的，
+    /// 在没有任何链路信息时，它是这台机器唯一可信的产出能力依据。
+    /// 两个编码器都没探出来则返回 `None`（调用方不做钳制）。
+    pub fn max_bitrate_kbps_any() -> Option<u32> {
+        [H264_MAX_KBPS.load(Ordering::Relaxed), H265_MAX_KBPS.load(Ordering::Relaxed)]
+            .into_iter()
+            .filter(|v| *v > 0)
+            .max()
+    }
+
     /// 记录一个**失败**的码率：生效上限会被压到它下面。
     fn record_rejected_kbps(codec: crate::video::vpx::SosCodec, kbps: u32) {
         if let Some(slot) = bad_slot(codec) {
@@ -567,6 +579,11 @@ mod disabled {
         None
     }
 
+    /// 同上：没有硬件编码器时没有可用的兜底值。
+    pub fn max_bitrate_kbps_any() -> Option<u32> {
+        None
+    }
+
     impl SosHwEncoder {
         pub fn new(
             _codec: crate::video::vpx::SosCodec,
@@ -619,10 +636,10 @@ mod disabled {
 #[cfg(feature = "hwcodec")]
 pub use enabled::{
     available, available_h265, encoder_name, encoder_name_h265, mark_unavailable,
-    mark_unavailable_h265, max_bitrate_kbps, probe_async, SosHwEncoder,
+    mark_unavailable_h265, max_bitrate_kbps, max_bitrate_kbps_any, probe_async, SosHwEncoder,
 };
 #[cfg(not(feature = "hwcodec"))]
 pub use disabled::{
     available, available_h265, encoder_name, encoder_name_h265, mark_unavailable,
-    mark_unavailable_h265, max_bitrate_kbps, probe_async, SosHwEncoder,
+    mark_unavailable_h265, max_bitrate_kbps, max_bitrate_kbps_any, probe_async, SosHwEncoder,
 };

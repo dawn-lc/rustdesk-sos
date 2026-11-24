@@ -15,11 +15,7 @@ use std::sync::OnceLock;
 /// 链路速率里可用于视频的比例：给协议开销、突发和同机其它流量留余量。
 const LINK_FRACTION: f32 = 0.8;
 
-/// 网卡速率读不到时的兜底上限（kbps）。
-///
-/// 这不是「编码器上限」，只是在拿不到链路信息时避免给出无意义的巨值；
-/// 正常情况（能读到网卡速率）永远走 `LINK_FRACTION × 链路速率`。
-const FALLBACK_CAP_KBPS: u32 = 40_000;
+
 
 /// 上限的绝对下限（kbps）：网卡速率异常时不至于把码率压死。
 const MIN_CAP_KBPS: u32 = 1_000;
@@ -33,13 +29,14 @@ extern "C" {
 
 /// 纯函数：链路速率（kbps）→ 码率上限（kbps）。
 ///
-/// `link_kbps == 0`（查不到）时退回 [`FALLBACK_CAP_KBPS`]。
-pub fn cap_kbps_for_link(link_kbps: u32) -> u32 {
+/// `link_kbps == 0` 表示链路速率未知，此时**不猜**上限：返回 `None`，由调用方
+/// 改用编码器侧的实测值兜底（见 `video::vpx` 的钳制处）。
+pub fn cap_kbps_for_link(link_kbps: u32) -> Option<u32> {
     if link_kbps == 0 {
-        return FALLBACK_CAP_KBPS;
+        return None;
     }
     let by_link = (link_kbps as f32 * LINK_FRACTION) as u32;
-    by_link.max(MIN_CAP_KBPS)
+    Some(by_link.max(MIN_CAP_KBPS))
 }
 
 /// 本机网卡最高链路速率（kbps）。查不到返回 `None`。
@@ -64,20 +61,20 @@ fn max_link_kbps() -> Option<u32> {
 ///
 /// 网卡速率在会话期间不会变（换网卡/插拔网线会重建管线），所以只查一次；
 /// 这同时避免了在每秒的码率计算路径上反复调用 IP Helper。
-pub fn cap_kbps() -> u32 {
-    static CAP: OnceLock<u32> = OnceLock::new();
+/// `None` = 链路速率读不出来 ⇒ 完全没有网络侧约束，由编码器侧兜底。
+pub fn cap_kbps() -> Option<u32> {
+    static CAP: OnceLock<Option<u32>> = OnceLock::new();
     *CAP.get_or_init(|| {
         let link = max_link_kbps();
         let cap = cap_kbps_for_link(link.unwrap_or(0));
-        match link {
-            Some(link) => log::info!(
+        match (&cap, link) {
+            (Some(cap), Some(link)) => log::info!(
                 "[BITRATE] link {} Mbps -> network cap {} kbps",
                 link / 1000,
                 cap
             ),
-            None => log::info!(
-                "[BITRATE] link speed unavailable -> fallback cap {} kbps",
-                cap
+            _ => log::info!(
+                "[BITRATE] link speed unreadable -> no network cap, encoder ceiling applies"
             ),
         }
         cap
