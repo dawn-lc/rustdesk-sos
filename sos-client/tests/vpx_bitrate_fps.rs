@@ -16,7 +16,7 @@
 
 use rustdesk_sos::video::vpx as sos_vpx;
 
-use sos_vpx::{SosCodec, SosVpxConfig, SosVpxEncoder};
+use sos_vpx::{LinkBudget, SosCodec, SosVpxConfig, SosVpxEncoder};
 use std::time::{Duration, Instant};
 
 fn make_motion(w: usize, h: usize, seed: usize) -> Vec<u8> {
@@ -189,4 +189,41 @@ fn measured_frame_size_follows_bitrate_over_fps() {
             "{kbps}kbps/{fps}fps 每帧只有 {measured:.1}KB，远低于理论 {theory:.1}KB"
         );
     }
+}
+
+// ── 码率硬上限 ──
+
+/// 控制端的自定义画质可以开到 2000%，换算出的倍率是 40x（上游同样钳 40）。
+///
+/// 对 1080p 默认基数再叠上充裕链路的 ×2，就是 **200 Mbps** —— 实测直接把硬件
+/// 编码器打崩（`incompatible video parameters (-14)` / `avcodec_send_frame failed`），
+/// 而且此后每次重建都带着同一个不可能的码率，画面持续黑屏。
+///
+/// 所以两条计算路径都必须钳在 [`SosVpxConfig::MAX_BITRATE_KBPS`]。
+#[test]
+fn bitrate_is_capped_for_extreme_custom_quality() {
+    let (w, h) = (1920usize, 1080usize);
+    let max = SosVpxConfig::MAX_BITRATE_KBPS;
+    // 40x = 控制端 2000% 档，正是现场触发崩溃的输入
+    for (ratio, fps, budget) in [
+        (40.0f32, 30u32, LinkBudget::Generous),
+        (40.0, 120, LinkBudget::Constrained),
+        (1.5, 30, LinkBudget::Generous),
+    ] {
+        let got = SosVpxConfig::bitrate_kbps_for_link(w, h, ratio, fps, budget);
+        assert!(
+            got <= max,
+            "{budget:?} ratio={ratio} fps={fps} -> {got}kbps 超过上限 {max}"
+        );
+    }
+    // 另一条路径（不带链路预算）同样要钳住
+    let plain = SosVpxConfig::bitrate_kbps_for(w, h, 40.0, 120);
+    assert!(plain <= max, "bitrate_kbps_for -> {plain}kbps 超过上限 {max}");
+
+    // 正常情况下**不能**被上限干扰：Best 档（1.5x）应当原样通过
+    let best = SosVpxConfig::bitrate_kbps_for(w, h, 1.5, 30);
+    assert!(
+        best < max,
+        "Best 档不应触到上限（{best}kbps），否则高质量档位被无谓削掉"
+    );
 }

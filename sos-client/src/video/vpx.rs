@@ -551,8 +551,25 @@ impl SosVpxConfig {
     pub fn bitrate_kbps_for(width: usize, height: usize, ratio: f32, fps: u32) -> u32 {
         let full = Self::default_bitrate_kbps(width, height) as f32;
         let factor = (fps as f32 / Self::NOMINAL_FPS).clamp(Self::MIN_FPS_FACTOR, 1.0);
-        (full * ratio * factor).max(150.0) as u32
+        (full * ratio * factor).clamp(150.0, Self::MAX_BITRATE_KBPS as f32) as u32
     }
+
+    /// 目标码率的**硬上限**（kbps）。
+    ///
+    /// 协议允许控制端把自定义画质开到 2000%（`custom_image_quality = 2000 << 8`），
+    /// 换算出的倍率是 **40x**（上游同样钳到 40）。对 1080p 默认基数 2500kbps 而言，
+    /// 再叠上充裕链路的 ×2，就是 **200 Mbps** —— 实测直接把编码器打崩：
+    ///
+    /// ```text
+    /// [VIDEO] display #0 ratio 40.00 ... -> bitrate 200000kbps
+    /// [ERROR] Error during resetting: incompatible video parameters (-14)
+    /// [ERROR] [FFMPEG_RAM_ENC] avcodec_send_frame failed, ret = Invalid argument
+    /// ```
+    ///
+    /// 之后每次重建都带着同一个不可能的码率，画面持续黑屏。硬件编码器（QSV/AMF/NVENC）
+    /// 与 libvpx 都吃不下这个量级，所以在这里统一钳死。50 Mbps 是 1080p 默认点的 20 倍、
+    /// 4K 也够用，同时远低于各类硬件编码器的实际接受上限。
+    pub const MAX_BITRATE_KBPS: u32 = 50_000;
 
     /// 链路充裕时额外放宽的码率倍率。
     ///
@@ -600,7 +617,8 @@ impl SosVpxConfig {
         match budget {
             LinkBudget::Generous => {
                 let full = Self::default_bitrate_kbps(width, height) as f32;
-                (full * ratio * Self::GOOD_LINK_BITRATE_GAIN).max(400.0) as u32
+                (full * ratio * Self::GOOD_LINK_BITRATE_GAIN)
+                    .clamp(400.0, Self::MAX_BITRATE_KBPS as f32) as u32
             }
             LinkBudget::Constrained => Self::bitrate_kbps_for(width, height, ratio, fps),
         }

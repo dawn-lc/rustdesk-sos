@@ -994,6 +994,25 @@ fn capture_loop(display: usize) {
                     );
                     if enc_overload >= need {
                         enc_overload = 0;
+                        // 硬件编码器**没有** cpu-used 这个旋钮，降档阶梯对它完全是空转：
+                        // 走进去只会白重建一次编码器，还打出「level 1 (fastest cpu-used)」
+                        // 这种对硬件毫无意义的日志。实测（hevc_qsv 1600x900）超支来自
+                        // 控制端把帧率拉到 120fps 让 spf 变成 8ms，不是编码器配置问题，
+                        // 重建一百次也解决不了。所以这里直接跳过，只留一条诊断。
+                        if matches!(
+                            crate::video::current_codec_for(display),
+                            SosCodec::H264 | SosCodec::H265
+                        ) {
+                            hbb_common::throttled_log!(
+                                std::time::Duration::from_secs(60),
+                                info,
+                                "[VIDEO] display #{} hardware encoder behind budget (enc {:.1}ms > {:.1}ms); cpu-used ladder does not apply",
+                                display,
+                                enc_avg_ms,
+                                budget_ms * crate::video::vpx::ENCODER_BUDGET_RATIO
+                            );
+                            continue;
+                        }
                         // 已在 VP8 上还超预算 → 先看它到底有没有帮上忙，
                         // 没帮上就回退，而不是一路卡在更慢更糊的编码器上。
                         let changed = if enc_level(display) >= 2 {
