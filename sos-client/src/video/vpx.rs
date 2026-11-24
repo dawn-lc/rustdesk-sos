@@ -645,6 +645,19 @@ impl SosVpxConfig {
         }
     }
 
+    /// 自定义画质下的目标码率：**只**按用户给定的画质比折算，QoS 完全不插手。
+    ///
+    /// 与 [`Self::bitrate_kbps_for_link`] 的差别是不乘链路增益、也不乘帧率因子
+    /// —— 那两个都是 QoS 的自适应手段，而自定义画质的语义是「用户已经自己权衡过
+    /// 带宽与画质」。帧率侧的对应退出在 `crate::video::qos::SosQos::on_test_delay`。
+    ///
+    /// 保留的只有**物理上限**（网卡速率 / 编码器实测上限，见 [`Self::clamp_to_cap`]）：
+    /// 那不是策略而是硬件与链路的能力边界，越过它只会得到 `-14` 或把链路打爆。
+    pub fn bitrate_kbps_exact(width: usize, height: usize, ratio: f32) -> u32 {
+        let full = Self::default_bitrate_kbps(width, height) as f32;
+        Self::clamp_to_cap(full * ratio, 150.0) as u32
+    }
+
     /// 依据分辨率与编码格式给出默认 `cpu-used`
     pub fn default_cpu_used(codec: SosCodec, width: usize, height: usize) -> u32 {
         match codec {

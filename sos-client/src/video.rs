@@ -598,13 +598,20 @@ fn capture_loop(display: usize) {
             // 链路充裕时不按帧率缩放码率，并放宽总预算（
             // 详见 [`SosVpxConfig::bitrate_kbps_for_link`] 与
             // [`SosVpxConfig::GOOD_LINK_BITRATE_GAIN`]）。
-            let kbps = SosVpxConfig::bitrate_kbps_for_link(
-                st.width,
-                st.height,
-                qos.ratio,
-                effective_fps,
-                link_budget(),
-            );
+            let kbps = if qos.custom {
+                // 自定义画质：用户自己权衡，QoS 不插手 —— 不乘链路增益、不乘
+                // 帧率因子（见 [`SosVpxConfig::bitrate_kbps_exact`]）。帧率侧
+                // 已在 `qos::SosQos::on_test_delay` 一并退出。
+                SosVpxConfig::bitrate_kbps_exact(st.width, st.height, qos.ratio)
+            } else {
+                SosVpxConfig::bitrate_kbps_for_link(
+                    st.width,
+                    st.height,
+                    qos.ratio,
+                    effective_fps,
+                    link_budget(),
+                )
+            };
             // 丢帧水位随链路状况切换：链路充裕时不丢帧保流畅，
             // 出现排队时守码率。见 [`GOOD_LINK_RTT_MS`]。
             let thresh = dropframe_thresh_for_link();
@@ -1330,13 +1337,18 @@ impl CaptureState {
         // `on_connection_open` / `on_connection_close` 由 `net::connection` 管理，
         // 这里只读**本屏**当前画质比，避免重建时把 QoS 状态重置。
         let ratio = crate::video::qos::ratio(&display_name);
-        let bitrate = SosVpxConfig::bitrate_kbps_for_link(
-            width,
-            height,
-            ratio,
-            SosVpxConfig::NOMINAL_FPS as u32,
-            link_budget(),
-        );
+        let bitrate = if crate::video::qos::is_custom(&display_name) {
+            // 与每秒同步那条路径保持一致：自定义画质不走 QoS 折算。
+            SosVpxConfig::bitrate_kbps_exact(width, height, ratio)
+        } else {
+            SosVpxConfig::bitrate_kbps_for_link(
+                width,
+                height,
+                ratio,
+                SosVpxConfig::NOMINAL_FPS as u32,
+                link_budget(),
+            )
+        };
         // 立刻把码率登记到 QoS：控制端显示的 `target_bitrate` 读的就是这个值。
         // 只在画质比变化时才 store 会让它在画质稳定时一直为 0，
         // 客户端因此看到 `qos_bitrate=0kbps`。

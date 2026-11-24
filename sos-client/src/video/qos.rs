@@ -33,6 +33,21 @@
 //! | `ratio` | 该屏所有连接取**最大** | 有人要求「最佳画质」就不该被别人拉低 |
 //! | `target_fps` | 该屏所有连接 `custom_fps` 取**最小** | 编码器只有一个，必须满足最慢的控制端 |
 //! | `fps` | 该屏所有连接自适应帧率取**最小** | 任一链路拥塞就该降，否则那块屏会持续积压 |
+//! | `custom` | 画质比**最大**的那个连接是否为自定义档 | 它就是实际生效的模式，见下 |
+//!
+//! # 自定义画质：QoS 退出
+//!
+//! 协议三档（`Low/Balanced/Best`）的语义是「让受控端自己决定」，所以码率与
+//! 帧率都由 QoS 自适应；而**自定义画质**是用户显式给出的画质比（自己权衡过
+//! 带宽与画质），此时 QoS 完全不插手该屏：
+//!
+//! | 量 | 自定义画质下 |
+//! |---|---|
+//! | 码率 | 只按 `ratio` 折算，只保留物理上限（网卡 / 编码器实测），见 [`crate::video::vpx::SosVpxConfig::bitrate_kbps_exact`] |
+//! | 帧率 | 恒为用户给的 `custom_fps`（缺省 `DEFAULT_FPS`），不做拥塞降帧 |
+//!
+//! 两者**必须同时**退出：只锁码率而继续降帧，每帧体积会随降帧变大 →
+//! 排队更久 → 测到的延迟更高（实测 rtt 35ms → 451ms 后画面卡死数秒）。
 //!
 //! 连接的帧率是**独立**自适应的（每个连接有自己的 `want_fps` 与
 //! `bad_samples`）。这样一条慢链路只会把共享的 fps 拉低，快链路恢复后
@@ -132,6 +147,16 @@ pub fn ratio_of_image_quality(q: i32) -> Option<f32> {
     }
 }
 
+/// 该 `ImageQuality` 值是否为**自定义**画质（而不是协议三档之一）。
+///
+/// 自定义画质的语义是「用户显式给了画质比，自己权衡带宽与画质」，因此 QoS
+/// 不再插手该屏的码率与帧率（见 `crate::video::vpx::SosVpxConfig::bitrate_kbps_exact`
+/// 与 [`SosQos::on_test_delay`]）。协议三档 `Low/Balanced/Best` 是「让受控端
+/// 自己决定」的档位，仍然走 QoS 自适应。
+pub fn is_custom_image_quality(q: i32) -> bool {
+    !matches!(q, 2 | 3 | 4) && ratio_of_image_quality(q).is_some()
+}
+
 /// 帧率下降一档（拥塞时每样本调用一次）
 ///
 /// 按比例降 25%，下限 [`MIN_FPS`]。从 30fps 到下限约需 5 个样本：
@@ -164,6 +189,8 @@ struct Conn {
     custom_fps: Option<u32>,
     /// 控制端指定的画质比（`Misc::Option.image_quality`）
     ratio: Option<f32>,
+    /// 该画质比是否来自**自定义**档位（为真时 QoS 不再插手该屏码率/帧率）
+    custom: bool,
     /// 该连接自己的自适应帧率
     want_fps: u32,
     /// 该连接连续判定饱和的样本数
@@ -220,6 +247,8 @@ pub struct DisplaySnapshot {
     pub worst_queue_ms: Option<u32>,
     /// 该屏所有连接里最大的 RTT
     pub worst_rtt_ms: Option<u32>,
+    /// 该屏是否处于自定义画质（为真时码率/帧率都由用户给定，QoS 不插手）
+    pub custom: bool,
 }
 
 impl Default for DisplaySnapshot {
@@ -232,6 +261,7 @@ impl Default for DisplaySnapshot {
             viewers: 0,
             worst_queue_ms: None,
             worst_rtt_ms: None,
+            custom: false,
         }
     }
 }
@@ -305,8 +335,13 @@ impl SosQos {
         match self.conns.get_mut(&id) {
             Some(c) => {
                 c.custom_fps = Some(fps);
-                // 上限调低时自适应值也要跟着收，不必等下一个样本
-                c.want_fps = c.want_fps.min(fps).max(MIN_FPS);
+                // 自定义画质下帧率完全由用户决定；否则上限调低时自适应值也要
+                // 跟着收，不必等下一个样本。
+                c.want_fps = if c.custom {
+                    fps
+                } else {
+                    c.want_fps.min(fps).max(MIN_FPS)
+                };
             }
             None => log::warn!("[QOS] custom_fps from unknown conn #{}", id),
         }
@@ -317,8 +352,17 @@ impl SosQos {
         let Some(r) = ratio_of_image_quality(image_quality) else {
             return;
         };
+        let custom = is_custom_image_quality(image_quality);
         match self.conns.get_mut(&id) {
-            Some(c) => c.ratio = Some(r),
+            Some(c) => {
+                c.ratio = Some(r);
+                c.custom = custom;
+                // 进入自定义画质时把自适应帧率拉回上限：否则之前因拥塞被压低的
+                // 值会一直留着，与「帧率也交给用户」的语义矛盾。
+                if custom {
+                    c.want_fps = c.target_fps();
+                }
+            }
             None => log::warn!("[QOS] image_quality from unknown conn #{}", id),
         }
     }
@@ -338,6 +382,15 @@ impl SosQos {
         };
         c.rtt_ms = Some(rtt_ms);
         c.queue_ms = Some(queue_ms);
+        // 自定义画质 = 用户自己权衡，QoS 不插手帧率（与码率侧
+        // `bitrate_kbps_exact` 一致）。两边**必须同时**退出：只锁码率而继续
+        // 降帧，会让每帧体积随降帧变大 → 排队更久 → 测到的延迟更高（实测
+        // rtt 从 35ms 冲到 451ms 后画面卡死数秒）。
+        if c.custom {
+            c.bad_samples = 0;
+            c.want_fps = c.target_fps();
+            return;
+        }
         let target = c.target_fps();
         let before = c.fps();
         if queue_ms >= QUEUE_BAD_MS {
@@ -415,6 +468,23 @@ impl SosQos {
             .clamp(BR_MIN, BR_MAX)
     }
 
+    /// 该显示器当前是否处于**自定义**画质（QoS 退出）。
+    ///
+    /// 由画质比最大的那个观看者决定 —— [`Self::ratio`] 也是取最大值，
+    /// 实际生效的模式就是它的模式。
+    pub fn is_custom(&self, display: &str) -> bool {
+        self.viewers_of(display)
+            .fold(None::<(f32, bool)>, |acc, c| {
+                let r = c.ratio();
+                Some(match acc {
+                    Some((ar, ac)) if ar >= r => (ar, ac),
+                    _ => (r, c.custom),
+                })
+            })
+            .map(|(_, custom)| custom)
+            .unwrap_or(false)
+    }
+
     /// 该显示器最近一次下发的码率
     pub fn bitrate_kbps(&self, display: &str) -> u32 {
         self.bitrates.get(display).copied().unwrap_or(0)
@@ -436,6 +506,7 @@ impl SosQos {
             viewers: viewers.len(),
             worst_queue_ms: viewers.iter().filter_map(|c| c.queue_ms).max(),
             worst_rtt_ms: viewers.iter().filter_map(|c| c.rtt_ms).max(),
+            custom: self.is_custom(display),
         }
     }
 }
@@ -470,6 +541,11 @@ pub fn fps(display: &str) -> u32 {
 /// 该显示器的画质比
 pub fn ratio(display: &str) -> f32 {
     with(|q| q.ratio(display))
+}
+
+/// 该显示器是否处于自定义画质（QoS 退出）
+pub fn is_custom(display: &str) -> bool {
+    with(|q| q.is_custom(display))
 }
 
 /// 该显示器最近一次下发的码率

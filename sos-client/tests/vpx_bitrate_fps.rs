@@ -281,3 +281,34 @@ fn generous_gain_only_for_standard_tiers() {
         );
     }
 }
+
+/// **自定义画质只认用户给的比例**：链路档位与帧率都不再参与折算。
+///
+/// 这锁的是「我就要这个码率」的语义 —— 用户既然自己权衡过带宽，QoS 的
+/// 充裕增益与帧率缩放都不该再动它；只剩网卡 / 编码器这类物理上限。
+#[test]
+fn custom_quality_bitrate_ignores_qos() {
+    let (w, h) = (1600usize, 900usize);
+    let ratio = 13.6f32;
+    let exact = SosVpxConfig::bitrate_kbps_exact(w, h, ratio);
+
+    // 就是「基数 × 画质比」，不带任何 QoS 折算
+    let base = SosVpxConfig::default_bitrate_kbps(w, h) as f32;
+    let expected = base * ratio;
+    assert!(
+        (exact as f32 - expected).abs() < expected * 0.05,
+        "自定义码率应为 基数×比例：得到 {exact}，期望约 {expected}"
+    );
+
+    // 充裕链路按用户值算，不乘增益 → 与 exact 一致
+    let generous = SosVpxConfig::bitrate_kbps_for_link(w, h, ratio, 30, LinkBudget::Generous);
+    assert_eq!(exact, generous, "充裕链路下自定义值不该再有增益");
+
+    // 而 QoS 的 constrained 折算会把它按帧率砍掉一大截 —— 这正是自定义模式要跳过的
+    let constrained_slow =
+        SosVpxConfig::bitrate_kbps_for_link(w, h, ratio, 8, LinkBudget::Constrained);
+    assert!(
+        constrained_slow * 2 <= exact,
+        "拥塞 + 8fps 时 QoS 会按帧率把码率砍半（{constrained_slow} vs {exact}），自定义模式必须绕开它"
+    );
+}

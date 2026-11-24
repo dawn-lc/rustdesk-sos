@@ -372,3 +372,35 @@ fn image_quality_changes_bitrate() {
     assert!((best - BR_BEST).abs() < 1e-6);
     assert!((low - BR_LOW).abs() < 1e-6);
 }
+
+/// **自定义画质 = 用户自己权衡，QoS 不插手**：拥塞也不得再降帧；
+/// 改回协议档位后自适应必须恢复（否则用户只是换了一次档位就被永久降帧）。
+#[test]
+fn custom_quality_disables_qos_fps_adaptation() {
+    let mut q = SosQos::new();
+    q.on_connection_open(1, DP0);
+
+    // 2.0x 自定义画质：协议编码为 (100 << 8)，解出来是 100 * 2 / 100 = 2.0
+    q.set_image_quality(1, 100 << 8);
+    assert!(q.is_custom(DP0), "2.0x 应被识别为自定义画质");
+    assert!((q.ratio(DP0) - 2.0).abs() < 0.01);
+
+    congest(&mut q, 1);
+    congest(&mut q, 1);
+    assert_eq!(
+        q.fps(DP0),
+        DEFAULT_FPS,
+        "自定义画质下拥塞也不得降帧（帧率交给用户）"
+    );
+
+    // 改回 Balanced：QoS 自适应恢复
+    q.set_image_quality(1, 3);
+    assert!(!q.is_custom(DP0), "协议三档不应被当成自定义画质");
+    congest(&mut q, 1);
+    congest(&mut q, 1);
+    assert!(
+        q.fps(DP0) < DEFAULT_FPS,
+        "改回标准档位后应恢复拥塞降帧，实际 {}",
+        q.fps(DP0)
+    );
+}
