@@ -193,6 +193,15 @@ mod enabled {
     /// 从 2 Mbps 直接跳到目标值，与生产里「用户改画质」的情形一致。
     const PROBE_REFERENCE_KBPS: u32 = 2_000;
 
+    /// 「连最低档都编不出来」的重试次数与间隔。
+    ///
+    /// 这一步失败**不代表**编码器不可用：探测线程与启动同时跑，那一刻机器可能
+    /// 正在切 RDP 断开 / 安全桌面（现场 hevc_qsv 就是这样被判成完全不可用，
+    /// 于是没有上限可发布，之后用户第一次拉高画质就崩一次 -14 才自愈）。
+    /// 重试几次即可把偶发失败与真正不可用区分开；真不可用时只多花这几次重试。
+    const PROBE_AVAIL_ATTEMPTS: u32 = 3;
+    const PROBE_AVAIL_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(300);
+
     /// 按编码器自己给的布局造一帧 NV12（Y 有渐变、色度中性）。
     fn probe_frame(encoder: &Encoder, width: usize, height: usize) -> Vec<u8> {
         let stride_y = encoder.linesize[0] as usize;
@@ -251,9 +260,21 @@ mod enabled {
         }
         let start = std::time::Instant::now();
         let mut lo = MAX_BITRATE_SEARCH_LOW;
-        if !bitrate_works(name, width, height, lo) {
+        let mut usable = bitrate_works(name, width, height, lo);
+        let mut attempt: u32 = 1;
+        while !usable && attempt < PROBE_AVAIL_ATTEMPTS {
+            std::thread::sleep(PROBE_AVAIL_RETRY_DELAY);
+            usable = bitrate_works(name, width, height, lo);
+            attempt += 1;
+        }
+        if !usable {
             // 连最低档都用不了，说明这台机器的失败与码率无关，不发布上限。
-            log::warn!("[HWENC] {} rejected even {}kbps, skip bitrate probe", name, lo);
+            log::warn!(
+                "[HWENC] {} rejected even {}kbps ({} attempts), skip bitrate probe",
+                name,
+                lo,
+                attempt
+            );
             return;
         }
         let mut hi = MAX_BITRATE_SEARCH_HIGH;

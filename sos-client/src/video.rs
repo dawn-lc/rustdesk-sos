@@ -981,42 +981,49 @@ fn capture_loop(display: usize) {
                     let severe =
                         crate::video::vpx::overload_is_severe(enc_avg_ms, conv_avg_ms, budget_ms);
                     let need = if severe { 1 } else { ENC_OVERLOAD_WINDOWS };
-                    log::info!(
-                        "[VIDEO] display #{} encoder overloaded {}/{} (enc {:.1} + conv {:.1} > budget {:.1}ms x {:.0}%, cap {:.1}ms, severe={})",
-                        display,
-                        enc_overload,
-                        need,
-                        enc_avg_ms,
-                        conv_avg_ms,
-                        budget_ms,
-                        crate::video::vpx::ENCODER_BUDGET_RATIO * 100.0,
-                        cap_avg_ms,
-                        severe
+                    // 硬件编码器**没有** cpu-used 这个旋钮，降档阶梯对它完全是空转：
+                    // 走进去只会白重建一次编码器，还打出「level 1 (fastest cpu-used)」
+                    // 这种对硬件毫无意义的日志。实测（hevc_qsv 1600x900）超支来自
+                    // 控制端把帧率拉到 60fps 让 spf 变成 16ms，不是编码器配置问题，
+                    // 重建一百次也解决不了。这个条件只要帧率不降就一直成立，属于**持续性**
+                    // 状态，所以必须限流，否则每个统计窗口都会刷一行。
+                    let hw = matches!(
+                        crate::video::current_codec_for(display),
+                        SosCodec::H264 | SosCodec::H265
                     );
+                    if hw {
+                        hbb_common::throttled_log!(
+                            std::time::Duration::from_secs(60),
+                            info,
+                            "[VIDEO] display #{} hardware encoder behind budget (enc {:.1} + conv {:.1} > budget {:.1}ms x {:.0}%, severe={}); cpu-used ladder does not apply",
+                            display,
+                            enc_avg_ms,
+                            conv_avg_ms,
+                            budget_ms,
+                            crate::video::vpx::ENCODER_BUDGET_RATIO * 100.0,
+                            severe
+                        );
+                    } else {
+                        log::info!(
+                            "[VIDEO] display #{} encoder overloaded {}/{} (enc {:.1} + conv {:.1} > budget {:.1}ms x {:.0}%, cap {:.1}ms, severe={})",
+                            display,
+                            enc_overload,
+                            need,
+                            enc_avg_ms,
+                            conv_avg_ms,
+                            budget_ms,
+                            crate::video::vpx::ENCODER_BUDGET_RATIO * 100.0,
+                            cap_avg_ms,
+                            severe
+                        );
+                    }
                     if enc_overload >= need {
                         enc_overload = 0;
-                        // 硬件编码器**没有** cpu-used 这个旋钮，降档阶梯对它完全是空转：
-                        // 走进去只会白重建一次编码器，还打出「level 1 (fastest cpu-used)」
-                        // 这种对硬件毫无意义的日志。实测（hevc_qsv 1600x900）超支来自
-                        // 控制端把帧率拉到 120fps 让 spf 变成 8ms，不是编码器配置问题，
-                        // 重建一百次也解决不了。所以这里直接跳过，只留一条诊断。
-                        if matches!(
-                            crate::video::current_codec_for(display),
-                            SosCodec::H264 | SosCodec::H265
-                        ) {
-                            hbb_common::throttled_log!(
-                                std::time::Duration::from_secs(60),
-                                info,
-                                "[VIDEO] display #{} hardware encoder behind budget (enc {:.1}ms > {:.1}ms); cpu-used ladder does not apply",
-                                display,
-                                enc_avg_ms,
-                                budget_ms * crate::video::vpx::ENCODER_BUDGET_RATIO
-                            );
-                            continue;
-                        }
                         // 已在 VP8 上还超预算 → 先看它到底有没有帮上忙，
                         // 没帮上就回退，而不是一路卡在更慢更糊的编码器上。
-                        let changed = if enc_level(display) >= 2 {
+                        let changed = if hw {
+                            false
+                        } else if enc_level(display) >= 2 {
                             revert_vp8_if_useless(display, enc_avg_ms)
                         } else {
                             step_down_encoder(display, enc_avg_ms)
