@@ -343,6 +343,14 @@ rustdesk-sos.exe -m hbbs.example.com
 | **WebRTC** | 支持 | `net::webrtc_in`，UDP 上的 DTLS 通道，见下 |
 | **UDP 打洞（KCP）** | 支持 | `net::kcp_in`，打通后数据走 KCP，见下 |
 
+四条传输在 **SOS 侧全部默认启用，没有任何开关或配置文件项**：收到哪种请求就接哪种。
+不需要在 SOS 上做任何配置，也不受 SOS 自身设置影响（唯一的例外是代理模式不答 WebRTC，
+因为 ICE 会绕过代理暴露真实 IP）。
+
+「能不能真用上」取决于两件本机无法控制的事：控制端是否请求该传输（`PunchHole` 里的
+`udp_port` / `webrtc_sdp_offer`），以及 hbbs 是否把这些字段转发过来 —— 后者目前不转发，
+详见下方「为什么 hbbs 永远不带 udp_port / webrtc_offer」。
+
 #### WebRTC 入站流程
 
 ```text
