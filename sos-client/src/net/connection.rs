@@ -234,13 +234,12 @@ pub async fn handle(
         is_file_transfer,
         video_ack_required
     );
-    // 握手期的控制端选项：解码能力决定编码格式，画质/帧率决定码率预算。
+    // 握手期的解码能力决定编码格式，可以立刻应用。
     //
-    // 画质必须在这里就应用：控制端**只在握手与用户改档两处发画质**（上游
-    // `src/client.rs` 的 `get_option_message(true)` 与会话中改档路径），不会周期性重发。
-    // 漏掉这一处，用户默认档位是 best / low / 自定义时，本端会一直停在
-    // Balanced(0.67)，直到用户手动动一次画质菜单 —— 表现为「第一次调画质没反应」。
-    register_peer_options(conn_id, &authorized_req);
+    // 画质/帧率**不能**在这里应用：QoS 的连接条目要等 `run_service_loop` 里的
+    // `on_connection_open` 才建立，早了会命中 `[QOS] image_quality from unknown conn`
+    // 并被丢弃。所以只把整条 option 传下去，由那边在注册之后应用。
+    register_peer_decoding(&authorized_req);
     // 控制端平台用于能力声明（见 `send_login_response` 里的
     // `has_file_clipboard`）。旧客户端不带这个字段，取到空串。
     let peer_platform = authorized_req.my_platform.clone();
@@ -260,7 +259,14 @@ pub async fn handle(
     }
 
     // Phase 3: 启动所有服务
-    let result = run_service_loop(stream, config, conn_id, video_ack_required).await;
+    let result = run_service_loop(
+        stream,
+        config,
+        conn_id,
+        video_ack_required,
+        authorized_req.option.to_owned().into_option(),
+    )
+    .await;
 
     // Phase 4: 连接清理
     log::info!("Connection closed");
@@ -1559,6 +1565,8 @@ async fn run_service_loop(
     _config: SosConfig,
     conn_id: i32,
     video_ack_required: bool,
+    // 握手期的 `Misc.Option`，画质/帧率必须在 QoS 连接注册**之后**应用（见调用点注释）
+    login_option: Option<base::message_proto::OptionMessage>,
 ) -> ResultType<()> {
     use tokio::time::{sleep, Duration};
 
@@ -1630,6 +1638,13 @@ async fn run_service_loop(
     // 这里先用索引对应的真实设备名注册，供 QoS 按屏聚合。
     let mut session = Session::new(conn_id, display, video_ack_required);
     crate::video::qos::with(|q| q.on_connection_open(conn_id, &session.qos_display_name()));
+    // 连接已注册进 QoS，此刻才能写画质/帧率。控制端只在握手与用户改档两处发画质
+    // （上游 `src/client.rs` 的 `get_option_message(true)` 与会话中改档），不会重发 ——
+    // 漏掉这一处，用户默认档位是 best/low/自定义时会一直停在 Balanced(0.67)，
+    // 直到手动动一次画质菜单才生效。
+    if let Some(opt) = login_option.as_ref() {
+        apply_option_quality(conn_id, opt);
+    }
 
     // 本次连接是否由控制端**主动关闭**（正常结束）。
     // 只有它为 true 时「会话结束后锁定」才会生效：发送/接收错误、协议错误
@@ -1943,6 +1958,7 @@ fn codec_prefer_of(
     match sd.prefer.enum_value() {
         Ok(PreferCodec::VP8) => CodecPrefer::Vp8,
         Ok(PreferCodec::VP9) => CodecPrefer::Vp9,
+        Ok(PreferCodec::H264) => CodecPrefer::H264,
         Ok(PreferCodec::H265) => CodecPrefer::H265,
         Ok(PreferCodec::Auto) => CodecPrefer::Auto,
         Ok(other) => {
@@ -1964,30 +1980,36 @@ fn codec_prefer_of(
 /// 枚举优先，`NotSet` 才看自定义值 —— 两者解析的是同一个 `OptionMessage`，
 /// 只是到达时机不同（登录握手 vs 会话中）。上游同样把整条 login option 交给
 /// `update_options`（`src/server/connection.rs`），不会漏掉画质。
-fn register_peer_options(conn_id: i32, lr: &base::message_proto::LoginRequest) {
-    if let Some(opt) = lr.option.as_ref() {
-        if opt.custom_fps > 0 {
-            crate::video::qos::with(|q| q.set_custom_fps(conn_id, opt.custom_fps as u32));
-        }
-        if let Ok(q) = opt.image_quality.enum_value() {
-            use base::message_proto::ImageQuality;
-            let v = if q == ImageQuality::NotSet {
-                opt.custom_image_quality
-            } else {
-                q as i32
-            };
-            if v > 0 {
-                log::info!(
-                    "[VIDEO] image quality from conn #{} (login): enum={:?} custom={} -> {}",
-                    conn_id,
-                    q,
-                    opt.custom_image_quality,
-                    v
-                );
-                crate::video::qos::with(|q| q.set_image_quality(conn_id, v));
-            }
+/// 应用一条 `OptionMessage` 里的画质与帧率。
+///
+/// 登录期（`LoginRequest.option`）与会话中（`Misc.Option`）走同一套语义：
+/// **枚举优先，`NotSet` 才看自定义值** —— 两者本来就是同一个消息，只是到达时机不同。
+/// 调用方必须保证该 `conn_id` 已在 `video::qos` 注册（否则值会被丢弃并记 warn）。
+fn apply_option_quality(conn_id: i32, opt: &base::message_proto::OptionMessage) {
+    if opt.custom_fps > 0 {
+        crate::video::qos::with(|q| q.set_custom_fps(conn_id, opt.custom_fps as u32));
+    }
+    if let Ok(q) = opt.image_quality.enum_value() {
+        use base::message_proto::ImageQuality;
+        let v = if q == ImageQuality::NotSet {
+            opt.custom_image_quality
+        } else {
+            q as i32
+        };
+        if v > 0 {
+            log::info!(
+                "[VIDEO] image quality from conn #{}: enum={:?} custom={} -> {}",
+                conn_id,
+                q,
+                opt.custom_image_quality,
+                v
+            );
+            crate::video::qos::with(|q| q.set_image_quality(conn_id, v));
         }
     }
+}
+
+fn register_peer_decoding(lr: &base::message_proto::LoginRequest) {
     let sd = lr
         .option
         .as_ref()
