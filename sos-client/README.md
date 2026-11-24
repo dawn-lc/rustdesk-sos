@@ -31,6 +31,15 @@ RustDesk 的裁剪版**受控端**（被控方）。仅支持 Windows，单一�
 - ✅ 多显示器：每块屏独立的采集管线与 QoS
 - ✅ 编码成本自适应：编不进帧预算时逐级降 `cpu-used`，再不行才试 VP8（实测不划算会自行回退）
 
+## 文档
+
+| 文档 | 内容 |
+| --- | --- |
+| [`AGENTS.md`](AGENTS.md) | 改代码前必读：硬约束、目录/模块地图、构建发布、上游依赖、架构要点、日志字段、测试与提交规范 |
+| [`docs/PITFALLS.md`](docs/PITFALLS.md) | 实机踩出来的实测结论，按主题分节（采集 / 编码 / 码率 / QoS / 锁屏 UAC / 弹窗 / CPU …） |
+| [`docs/KNOWN-LIMITS.md`](docs/KNOWN-LIMITS.md) | 已知限制：刻意留下的行为与系统级限制，**不要当 bug 修** |
+
+---
 ## 构建
 
 需要 vcpkg 提供静态 `libvpx`（`VCPKG_ROOT` 指向 vcpkg 安装目录）。
