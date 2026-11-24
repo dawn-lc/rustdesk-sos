@@ -366,7 +366,14 @@ impl SosQos {
 
     // ── 显示器聚合视图 ──
 
-    /// 观看该显示器的连接迭代器
+    /// 观看该显示器的连接迭代器。
+    ///
+    /// 按名字严格过滤：多屏时必须区分「谁在看哪块屏」，否则一块屏的高画质会
+    /// 串到另一块屏（`tests/qos_multidisplay.rs` 锁死这条）。
+    ///
+    /// 名字失配的问题（采集器改名 `DISPLAY369` → `DISPLAY1`、安全桌面变 `UAC`）
+    /// 由 `net::connection` 的每秒定时器**把连接的名字同步过来**解决，不在这里兜底 ——
+    /// 兜底会让「这块屏没人看」误用别的屏的设置。
     fn viewers_of<'a>(&'a self, display: &'a str) -> impl Iterator<Item = &'a Conn> + 'a {
         self.conns.values().filter(move |c| c.display == display)
     }

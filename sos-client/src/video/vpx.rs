@@ -554,6 +554,14 @@ impl SosVpxConfig {
         Self::clamp_to_cap(full * ratio * factor, 150.0) as u32
     }
 
+    /// 是否为协议标准画质档位（而不是自定义画质）。
+    fn is_standard_tier(ratio: f32) -> bool {
+        use crate::video::qos::{BR_BALANCED, BR_BEST, BR_LOW};
+        [BR_LOW, BR_BALANCED, BR_BEST]
+            .iter()
+            .any(|r| (r - ratio).abs() < 0.01)
+    }
+
     /// 施加码率上限并保底。
     ///
     /// 上限来源有优先级：
@@ -621,7 +629,17 @@ impl SosVpxConfig {
         match budget {
             LinkBudget::Generous => {
                 let full = Self::default_bitrate_kbps(width, height) as f32;
-                Self::clamp_to_cap(full * ratio * Self::GOOD_LINK_BITRATE_GAIN, 400.0) as u32
+                // 增益只给协议标准档位（Low / Balanced / Best）—— 它本来就是按这套
+                // 档位标定的（Balanced 0.67 × 2 ≈ 2326kbps）。套到**自定义画质**上
+                // 等于二次放大用户的显式意图：现场 2000% 档（40x）被乘成 80x，算出
+                // 200 Mbps 直接打崩硬件编码器（`incompatible video parameters (-14)`）。
+                // 自定义值的语义是「我就要这个码率」，QoS 不该再动它。
+                let gain = if Self::is_standard_tier(ratio) {
+                    Self::GOOD_LINK_BITRATE_GAIN
+                } else {
+                    1.0
+                };
+                Self::clamp_to_cap(full * ratio * gain, 400.0) as u32
             }
             LinkBudget::Constrained => Self::bitrate_kbps_for(width, height, ratio, fps),
         }

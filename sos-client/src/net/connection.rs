@@ -1755,6 +1755,13 @@ async fn run_service_loop(
 
             // TestDelay：每 1 秒发送给客户端（供其显示延迟和码率）
             _ = test_delay_timer.tick() => {
+                // 把 QoS 里该连接记录的显示器名同步成「当前真实设备名」。
+                // 名字会变：RDP 会话里 `DISPLAY369`，解锁后变成 `DISPLAY1`，锁屏期间是 `UAC`。
+                // 不在注册时固定下来，改名之后 `viewers_of` 就查不到这个连接，
+                // 画质/帧率全部回落默认值 —— 表现为「控制端改画质完全没反应」
+                // （现场日志：收到 `enum=Best`，但 `qos_bitrate` 一直停在默认档）。
+                // `on_connection_open` 对同一个 id 只更新显示器，不动其它设置。
+                crate::video::qos::with(|q| q.on_connection_open(conn_id, &session.qos_display_name()));
                 if session.should_send_probe() {
                     let mut td = TestDelay::new();
                     td.time = hbb_common::get_time();

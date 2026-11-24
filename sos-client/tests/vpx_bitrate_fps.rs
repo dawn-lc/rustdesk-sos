@@ -245,3 +245,39 @@ fn bitrate_is_capped_for_extreme_custom_quality() {
         assert!(SosVpxConfig::bitrate_kbps_for(w, h, 1.5, 30) < cap / 2);
     }
 }
+
+// ── QoS 增益只作用于协议标准档位 ──
+
+/// 「充裕链路 ×2」是按标准三档标定的，不能放大自定义画质。
+///
+/// 现场：控制端 2000% 档（40x）叠上 ×2 变成 80x，算出 200 Mbps，
+/// 硬件编码器直接 `incompatible video parameters (-14)` 并持续黑屏。
+/// 自定义画质的语义是「我就要这个码率」，QoS 不该再动它。
+#[test]
+fn generous_gain_only_for_standard_tiers() {
+    use rustdesk_sos::video::qos::{BR_BALANCED, BR_BEST, BR_LOW};
+    let (w, h) = (1920usize, 1080usize);
+    let base = SosVpxConfig::default_bitrate_kbps(w, h) as f32;
+
+    // 标准三档：充裕链路 = 基数 × 档位 × 2
+    for tier in [BR_LOW, BR_BALANCED, BR_BEST] {
+        let generous =
+            SosVpxConfig::bitrate_kbps_for_link(w, h, tier, 30, LinkBudget::Generous) as f32;
+        let expected = base * tier * 2.0;
+        assert!(
+            (generous - expected).abs() < expected * 0.25,
+            "标准档 {tier} 应吃到 ×2 增益：得到 {generous}，期望约 {expected}"
+        );
+    }
+
+    // 自定义值：不给增益，按用户给的比例原样算
+    for custom in [0.3f32, 2.0, 13.6, 40.0] {
+        let generous =
+            SosVpxConfig::bitrate_kbps_for_link(w, h, custom, 30, LinkBudget::Generous) as f32;
+        let with_gain = base * custom * 2.0;
+        assert!(
+            generous < with_gain * 0.9,
+            "自定义 {custom} 不该被 ×2：得到 {generous}，带增益会是 {with_gain}"
+        );
+    }
+}
