@@ -104,7 +104,8 @@ sos-client/
 │   ├── input.rs          远程鼠标/键盘注入（单文件，无子模块）
 │   ├── ui.rs             本机用户界面域根
 │   ├── ui/
-│   │   └── consent.rs    连接确认弹窗
+│   │   ├── consent.rs    连接确认弹窗
+│   │   └── device_id.rs  设备编号窗（注册后置顶居中显示编号，控制请求到达即关）
 │   └── bindings/
 │       └── vpx_ffi.h     bindgen 的输入，只声明用到的 libvpx 符号
 ├── tests/                38 个集成测试二进制；support/ 是共用内容生成器（非测试目标）
@@ -118,11 +119,8 @@ sos-client/
 
 ### `src/` 为什么现在分层
 
-旧结构是「全部平铺 + `sos_` 前缀」，唯一的理由是**测试要复用源文件**：那时没有库
-目标，`tests/*.rs` 只能用 `#[path = "../src/sos_xxx.rs"] mod sos_xxx;` 把某个源文件
-重新编译进自己的二进制（测试里的 `crate::sos_xxx` 因此也能解析）。文件一移动就要
-连带改 30+ 个 `#[path]`，所以只在 `main.rs` 顶部维护一张「模块地图」做逻辑分组，
-不动文件位置。
+旧结构是「全部平铺 + `sos_` 前缀」，唯一理由只是**测试要复用源文件**：没有库目标时
+`tests/*.rs` 只能用 `#[path]` 把源文件编进自己的二进制。
 
 **现在有了 `src/lib.rs`，这个理由消失了**：测试改成 `use rustdesk_sos::video::vpx as
 sos_vpx;`，直接链接库，于是按域分层：
@@ -188,6 +186,7 @@ sos_vpx;`，直接链接库，于是按域分层：
 | | `ipc::shmem` | `src/ipc/shmem.rs` | 共享内存帧通道 |
 | 输入 | `input` | `src/input.rs` | 远程鼠标/键盘注入（单文件，无子模块） |
 | 界面 | `ui::consent` | `src/ui/consent.rs` | 连接确认弹窗（Win32 置顶窗口，默认启用；锁屏/UAC 时由调用方跳过） |
+| | `ui::device_id` | `src/ui/device_id.rs` | 设备编号窗：注册上管理服务器后弹一次、置顶居中、**不自动关**；用户关闭或入站控制请求到达才收，重连不重复弹 |
 
 依赖方向**不是**严格单向，按实际调用统计是这样（与 `src/lib.rs` 顶部注释一致）：
 
@@ -434,9 +433,8 @@ ConnectionRefused = 降档；其余 = 重建（连续 5 次才降档）。
   变成忙等（现场：无会话时稳定烧 25% CPU）。
 - `SosWaitForDesktopSwitch` 的等待**必须是有限超时**（1s）。钩子只是加速器：会话被锁
   / RDP 断开后**不再收到任何 WinEvent**，`INFINITE` 会让 watcher 永远静默。
-- GDI 路径 `BitBlt` 固定开销 7-8ms（win32k 往返），1080p 以上受 ~780MB/s 带宽瓶颈；
-  `scrap` 原版还额外做 GetDIBits + 全帧镜像 + 全帧旋转 + 每帧 8MB 分配 + 8MB memcmp，
-  自建 DIB 直写全部省掉。
+- GDI 路径 `BitBlt` 固定开销 7-8ms（win32k 往返）；自建 DIB 直写省掉了 `scrap`
+  原版的 GetDIBits + 全帧镜像 + 全帧旋转 + 每帧 8MB 分配与 memcmp。
 
 ### 硬件编码（H.264/H.265）
 

@@ -252,6 +252,12 @@ async fn handle_rendezvous_message(
             });
         }
         Some(rendezvous_message::Union::RegisterPeerResponse(rpr)) => {
+            if !rpr.request_pk {
+                // 已注册上管理服务器：编号此刻是最终的，直接摆到用户面前。
+                // 首次运行时服务端会先要 RegisterPk（见下面的分支），那条路径
+                // 可能在 UUID_MISMATCH 里改号，所以这里不显示。
+                crate::ui::device_id::show(&crate::app::config::RegistryConfig::get_id());
+            }
             if rpr.request_pk {
                 log::info!("信令服务器请求 RegisterPk（公钥注册）");
                 let (_sk, pk) = crate::app::config::RegistryConfig::get_key_pair();
@@ -270,6 +276,7 @@ async fn handle_rendezvous_message(
                 register_pk_response::Result::OK => {
                     crate::app::config::RegistryConfig::set_key_confirmed(true);
                     log::info!("公钥注册成功");
+                    crate::ui::device_id::show(&crate::app::config::RegistryConfig::get_id());
                 }
                 register_pk_response::Result::UUID_MISMATCH => {
                     log::warn!("UUID_MISMATCH，设备身份冲突，更换 ID 后重新注册");

@@ -37,6 +37,8 @@ pub async fn handle(
         config.id,
         !config.password.is_empty()
     );
+    // 有人来连了：编号的任务已经完成，收掉窗口 —— 否则它会一直压在授权弹窗前面。
+    crate::ui::device_id::close();
 
     // 检查登录频率限制
     let wait = check_login_rate_limit(&addr_str);
