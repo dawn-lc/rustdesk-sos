@@ -41,8 +41,8 @@ pub enum SosCodec {
 
 /// 控制端的编码偏好，对应协议里的 `SupportedDecoding.prefer`。
 ///
-/// H.264 需要硬件编码器才可用；H265 / AV1 本端没有对应后端，映射为
-/// [`CodecPrefer::Auto`]。
+/// H.264 / H.265 都需要硬件编码器才可用（见 `crate::video::hwenc`）；AV1 本端没有
+/// 后端，映射为 [`CodecPrefer::Auto`]。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CodecPrefer {
     #[default]

@@ -1179,7 +1179,7 @@ fn demote_capturer(slot: usize, reason: &str) {
 
 /// 当前生效的编码器后端。
 ///
-/// 软件（libvpx 的 VP8/VP9）与硬件（FFmpeg 的 nvenc/qsv/amf，**只出 H.264**）的
+/// 软件（libvpx 的 VP8/VP9）与硬件（FFmpeg 的 nvenc/qsv/amf，**只出 H.264 / H.265**）的
 /// 接口形状不同，差异集中在这个薄包装里，主循环对两者保持同一形状：
 ///
 /// | 差异 | libvpx | 硬件 |

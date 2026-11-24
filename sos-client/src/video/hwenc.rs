@@ -1,11 +1,11 @@
-//! H.264 硬件编码后端（FFmpeg 的 nvenc / qsv / amf，走 CPU 的 NV12 输入）。
+//! H.264 / H.265 硬件编码后端（FFmpeg 的 nvenc / qsv / amf，走 CPU 的 NV12 输入）。
 //!
 //! 为什么单独一个模块：`video::vpx` 是 libvpx 专用实现（VP8/VP9、毫秒级 rc 缓冲、
 //! `rc_dropframe_thresh`、0-63 量化器），而硬件编码是**另一套语义**：
 //!
 //! | 维度 | libvpx（`video::vpx`） | 硬件（本模块） |
 //! | --- | --- | --- |
-//! | 编码格式 | VP8 / VP9 | **只有 H.264**（上游 `hwcodec` 不提供 VP8/VP9 硬件编码） |
+//! | 编码格式 | VP8 / VP9 | **H.264 / H.265**（上游 `hwcodec` 不提供 VP8/VP9 硬件编码） |
 //! | 输入布局 | I420（`STRIDE_ALIGN=64`） | **NV12**，stride 由编码器自己给 |
 //! | 码率控制 | `rc_buf_*=1000ms` + `rc_dropframe_thresh` | 只有绝对码率；**没有「编码器内部丢帧」** |
 //! | 量化器 | `VP8E_GET_LAST_QUANTIZER_64` 可回读 | 不可回读 |

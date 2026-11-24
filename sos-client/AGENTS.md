@@ -88,7 +88,7 @@ sos-client/
 │   │   ├── displays.rs   显示器枚举、命名与切换消息（`display_info` / `list_displays` / `set_display_name` /
 │   │   │                 `cached_display_name` / `make_switch_display_msg` / `is_remote_session`）
 │   │   ├── vpx.rs        自建 libvpx 编码器 + 码率/链路档位/降级策略（纯函数集中在这里）
-│   │   ├── hwenc.rs      硬件 H.264 编码器（`hwcodec` 的 FFmpeg 后端，吃 CPU 的 NV12）
+│   │   ├── hwenc.rs      硬件 H.264/H.265 编码器（`hwcodec` 后端，吃 CPU 的 NV12）
 │   │   └── qos.rs        RTT / 帧率 / 码率 / 画质比，按显示器聚合
 │   ├── net.rs            网络域根
 │   ├── net/
@@ -177,7 +177,7 @@ sos_vpx;`，直接链接库，于是按域分层：
 | | `video::ability` | `src/video/ability.rs` | 控制端编码能力与当前编码格式：`PEER_ABILITY`、`set_hw_unavailable` / `hw_available`、`set_peer_codec_ability`、`current_codec` / `describe` / `codec_name` |
 | | `video::displays` | `src/video/displays.rs` | 显示器枚举、命名与切换消息：`display_info` / `list_displays` / `set_display_name` / `cached_display_name` / `make_switch_display_msg` / `is_remote_session` |
 | | `video::vpx` | `src/video/vpx.rs` | 自建 libvpx 编码器 + 码率/链路档位/降级策略（纯函数集中在这里，便于单测） |
-| | `video::hwenc` | `src/video/hwenc.rs` | 硬件 H.264 编码器（`hwcodec` 的 FFmpeg 后端：nvenc/qsv/amf，吃 CPU 的 NV12） |
+| | `video::hwenc` | `src/video/hwenc.rs` | 硬件 H.264/H.265 编码器（`hwcodec` 后端：nvenc/qsv/amf，吃 CPU 的 NV12） |
 | | `video::qos` | `src/video/qos.rs` | RTT / 帧率 / 码率 / 画质比，按显示器聚合 |
 | 网络 | `net::connection` | `src/net/connection.rs` | 会话主循环、能力协商、消息分派、`Conn` 拆半区 |
 | | `net::rendezvous` | `src/net/rendezvous.rs` | 信令服务器交互（注册、PunchHole、RequestRelay） |
@@ -436,7 +436,7 @@ ConnectionRefused = 降档；其余 = 重建（连续 5 次才降档）。
   `scrap` 原版还额外做 GetDIBits + 全帧镜像 + 全帧旋转 + 每帧 8MB 分配 + 8MB memcmp，
   自建 DIB 直写全部省掉。
 
-### 硬件编码（H.264）
+### 硬件编码（H.264/H.265）
 
 - **`hwcodec` 是默认 feature**（`sos-client/Cargo.toml` 的 `default = ["hwcodec"]`）：
   普通 `cargo xtask` 出的就是带硬件编码的版本，产物约 29.4 MB（压缩前）/ 7~8 MB（UPX）。

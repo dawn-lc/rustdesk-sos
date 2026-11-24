@@ -44,7 +44,7 @@ CompanyName = "RustDesk SOS maintainers"
 LegalCopyright = "Copyright (C) RustDesk SOS maintainers. Licensed under AGPL-3.0."
 
 [features]
-# 硬件 H.264 编码（FFmpeg 的 nvenc/qsv/amf，走 CPU 的 NV12）**默认开启**。
+# 硬件 H.264/H.265 编码（FFmpeg 的 nvenc/qsv/amf，走 CPU 的 NV12）**默认开启**。
 #
 # 打开它需要构建机上有 vcpkg 的静态 FFmpeg：`$VCPKG_ROOT/installed/x64-windows-static/lib`
 # 下要有 avcodec/avutil/avformat/swresample/libmfx（由本仓库 `vcpkg.json` + `res/vcpkg`

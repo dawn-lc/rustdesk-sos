@@ -603,7 +603,7 @@ src/
   video/ability.rs    控制端编码能力与当前编码格式（PEER_ABILITY）
   video/displays.rs   显示器枚举、命名缓存与切换消息
   video/vpx.rs        libvpx 封装、编码格式决策、码率/预算纯函数（可单测）
-  video/hwenc.rs      硬件 H.264（hwcodec 的 FFmpeg 后端）
+  video/hwenc.rs      硬件 H.264/H.265（hwcodec 的 FFmpeg 后端）
   video/qos.rs        按显示器的帧率/画质/码率状态机（纯逻辑可单测）
   ── 网络（net）──
   net.rs              域根
