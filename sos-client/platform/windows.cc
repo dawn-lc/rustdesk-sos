@@ -8,11 +8,21 @@
 #define _UNICODE
 #endif
 
+// iphlpapi.h（GetAdaptersAddresses）要求先有 winsock2.h，且 GAA_FLAG_* 在
+// Vista+ 才声明 —— 不定义 _WIN32_WINNT 时这些标识符根本不可见。
+#ifndef _WIN32_WINNT
+#define _WIN32_WINNT 0x0601
+#endif
+
+#include <winsock2.h>
 #include <windows.h>
 #include <wtsapi32.h>
 #include <tlhelp32.h>
+#include <iphlpapi.h>
+#include <vector>
 
 #pragma comment(lib, "wtsapi32.lib")
+#pragma comment(lib, "iphlpapi.lib")
 
 extern "C" {
 
@@ -322,6 +332,42 @@ int SosWaitForDesktopSwitch(DWORD dwTimeout)
             return -1;
         }
     }
+}
+
+// ── 网卡链路速率 ──
+
+/// 所有**已连通**物理网卡里最高的发送链路速率（bit/s）。0 = 查不到。
+///
+/// 用途：给目标码率定上限（见 `video::netspeed`）。千兆网返回 1e9，
+/// 百兆网返回 1e8 —— 超过物理链路的码率没有任何意义。
+///
+/// 跳过环回与隧道适配器：它们报的速率（如 1 Gbps 的 loopback）与真实出口无关，
+/// VPN 隧道报的速率也不是底层链路的能力。
+unsigned long long SosMaxLinkSpeedBps() {
+    ULONG size = 16 * 1024;
+    // GetAdaptersAddresses 的常规用法：缓冲区不够会返回 ERROR_BUFFER_OVERFLOW
+    // 并把所需大小写回 size，重试即可。最多两轮，避免异常环境里死循环。
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        std::vector<BYTE> buf(size);
+        ULONG ret = GetAdaptersAddresses(
+            AF_UNSPEC,
+            GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER,
+            nullptr,
+            reinterpret_cast<IP_ADAPTER_ADDRESSES*>(buf.data()),
+            &size);
+        if (ret == ERROR_BUFFER_OVERFLOW) continue;
+        if (ret != NO_ERROR) return 0;
+
+        unsigned long long best = 0;
+        for (auto* a = reinterpret_cast<IP_ADAPTER_ADDRESSES*>(buf.data()); a != nullptr;
+             a = a->Next) {
+            if (a->OperStatus != IfOperStatusUp) continue;
+            if (a->IfType == IF_TYPE_SOFTWARE_LOOPBACK || a->IfType == IF_TYPE_TUNNEL) continue;
+            if (a->TransmitLinkSpeed > best) best = a->TransmitLinkSpeed;
+        }
+        return best;
+    }
+    return 0;
 }
 
 } // extern "C"

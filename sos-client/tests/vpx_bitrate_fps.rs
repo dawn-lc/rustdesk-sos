@@ -191,19 +191,43 @@ fn measured_frame_size_follows_bitrate_over_fps() {
     }
 }
 
-// ── 码率硬上限 ──
+// ── 码率硬上限（按网卡链路速率）──
 
-/// 控制端的自定义画质可以开到 2000%，换算出的倍率是 40x（上游同样钳 40）。
+/// 上限必须随网卡速率变化，而不是写死一个常数。
 ///
-/// 对 1080p 默认基数再叠上充裕链路的 ×2，就是 **200 Mbps** —— 实测直接把硬件
-/// 编码器打崩（`incompatible video parameters (-14)` / `avcodec_send_frame failed`），
-/// 而且此后每次重建都带着同一个不可能的码率，画面持续黑屏。
+/// 百兆网可用带宽 ~80 Mbps，千兆网远高于编码器能产出的量级，所以后者由
+/// 编码器等级上限兜底（HEVC Level 4.1 在 1080p 允许 50 Mbps，取 40 留余量）。
+#[test]
+fn cap_follows_link_speed() {
+    use rustdesk_sos::video::netspeed::{cap_kbps_for_link, ENCODER_CEILING_KBPS as CEIL};
+
+    // 慢链路（< 50 Mbps）：网卡是瓶颈，上限按 0.8 倍链路速率走
+    assert_eq!(cap_kbps_for_link(30_000), 24_000, "30 Mbps 链路应给 24 Mbps");
+    assert_eq!(cap_kbps_for_link(10_000), 8_000, "10 Mbps 链路应给 8 Mbps");
+
+    // 百兆网及以上：编码器上限先到（HEVC L4.1 在 1080p 只允许 ~50 Mbps），
+    // 此时网卡不再是瓶颈 —— 这正是「宁可用不满带宽也不能打崩编码器」。
+    assert_eq!(cap_kbps_for_link(100_000), CEIL, "100 Mbps 链路由编码器上限兜底");
+    assert_eq!(cap_kbps_for_link(1_000_000), CEIL);
+    assert_eq!(cap_kbps_for_link(10_000_000), CEIL, "万兆网同样不该超过编码器上限");
+
+    // 读不到速率：只保留编码器上限（保守但可用）
+    assert_eq!(cap_kbps_for_link(0), CEIL);
+
+    // 极慢链路：仍有下限，不至于把码率压死
+    assert_eq!(cap_kbps_for_link(1), 1_000);
+}
+
+/// 控制端的自定义画质可以开到 2000%，换算倍率 40x（上游同样钳 40）。
 ///
-/// 所以两条计算路径都必须钳在 [`SosVpxConfig::MAX_BITRATE_KBPS`]。
+/// 对 1080p 默认基数再叠上充裕链路的 ×2 曾是 **200 Mbps** —— 实测直接把硬件编码器
+/// 打崩（`incompatible video parameters (-14)`），此后每次重建都带着同一个不可能的
+/// 码率，画面持续黑屏。两条计算路径都必须落在上限之内。
 #[test]
 fn bitrate_is_capped_for_extreme_custom_quality() {
+    use rustdesk_sos::video::netspeed::cap_kbps;
     let (w, h) = (1920usize, 1080usize);
-    let max = SosVpxConfig::MAX_BITRATE_KBPS;
+    let cap = cap_kbps();
     // 40x = 控制端 2000% 档，正是现场触发崩溃的输入
     for (ratio, fps, budget) in [
         (40.0f32, 30u32, LinkBudget::Generous),
@@ -212,18 +236,14 @@ fn bitrate_is_capped_for_extreme_custom_quality() {
     ] {
         let got = SosVpxConfig::bitrate_kbps_for_link(w, h, ratio, fps, budget);
         assert!(
-            got <= max,
-            "{budget:?} ratio={ratio} fps={fps} -> {got}kbps 超过上限 {max}"
+            got <= cap,
+            "{budget:?} ratio={ratio} fps={fps} -> {got}kbps 超过上限 {cap}"
         );
     }
-    // 另一条路径（不带链路预算）同样要钳住
     let plain = SosVpxConfig::bitrate_kbps_for(w, h, 40.0, 120);
-    assert!(plain <= max, "bitrate_kbps_for -> {plain}kbps 超过上限 {max}");
+    assert!(plain <= cap, "bitrate_kbps_for -> {plain}kbps 超过上限 {cap}");
 
-    // 正常情况下**不能**被上限干扰：Best 档（1.5x）应当原样通过
+    // 正常档位不能被上限干扰：Best(1.5x) 在 1080p 下约 7500kbps
     let best = SosVpxConfig::bitrate_kbps_for(w, h, 1.5, 30);
-    assert!(
-        best < max,
-        "Best 档不应触到上限（{best}kbps），否则高质量档位被无谓削掉"
-    );
+    assert!(best * 3 < cap, "Best 档 {best}kbps 离上限 {cap} 太近，正常画质会被削掉");
 }

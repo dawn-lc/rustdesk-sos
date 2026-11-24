@@ -26,6 +26,7 @@ pub mod displays;
 pub mod hub;
 pub mod ladder;
 pub mod link;
+pub mod netspeed;
 
 pub use ability::*;
 pub use displays::*;

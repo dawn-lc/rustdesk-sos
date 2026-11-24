@@ -745,9 +745,8 @@ ConnectionRefused = 降档；其余 = 重建（连续 5 次才降档）。
 - **库有 doctest**：`cargo test` 会编译文档注释里的围栏代码块。引用外部源码（例如
   hbbs 的 Rust 片段）的块必须标 `text`，否则被当成示例编译并失败 —— `net/relay.rs`
   就是这么改过来的。新增文档块时同样处理。
-- **纯测量型基准默认不跑**（`#[ignore]`）：13 个文件**一个断言都没有**，
-  只打印数字供人看，跑它们只有成本没有收益，而且曾经占掉整套 `cargo test`
-  187 秒里的 167 秒。要跑某个基准：
+- **纯测量型基准默认不跑**（`#[ignore]`）：13 个文件都没有断言，只打印数字供人看；
+  曾占掉整套 `cargo test` 187 秒里的 167 秒。要跑某个基准：
 
   ```powershell
   cargo test --manifest-path d:\code\rustdesk\sos-client\Cargo.toml --test vpx_drop_diag -- --ignored --nocapture
@@ -756,8 +755,8 @@ ConnectionRefused = 降档；其余 = 重建（连续 5 次才降档）。
 
   已忽略的文件：`vpx_drop_diag` `vpx_rc_mode` `vpx_mem` `vpx_enc_throughput` `vpx_cpuused`
   `vpx_budget` `vpx_screen_content` `periodic_cost` `hw_vs_sw_bench` `vpx_threads`
-  `enc_bench` `codec_cost` `gdi_bench`。**新增基准请照此办理**（`#[test]` 下面加
-  `#[ignore = "实机基准…"]`），不要往默认流程里塞。
+  `enc_bench` `codec_cost` `gdi_bench` `hw_bitrate_limit`。**新增基准请照此办理**（`#[test]` 下面加
+  `#[ignore = "实机基准…"]`），别塞进默认流程。
 - 不少测试是**实机基准**（编码吞吐、内存、采集延迟），数值随机器变化，
   它们的作用是「同机 A/B 对比」，不要按注释里的绝对数字做断言。
 - **采集类测试都要能在「抓不到帧」的环境里优雅跳过**（锁屏 / 会话断开 / 同一个二进制里
