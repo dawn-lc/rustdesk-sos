@@ -36,7 +36,7 @@ mod enabled {
         },
     };
     use scrap::{codec::base_bitrate, EncodeYuvFormat, Pixfmt, HW_STRIDE_ALIGN};
-    use std::sync::atomic::{AtomicU8, Ordering};
+    use std::sync::atomic::{AtomicU32, AtomicU8, Ordering};
 
 
     /// 与上游一致的编码参数（见 `scrap::hwcodec::HwRamEncoder::new`）。
@@ -102,6 +102,135 @@ mod enabled {
         name_of(&H265_NAME)
     }
 
+    // ── 码率上限：实测得到，不用常数 ──
+    //
+    // 「编码器能吃多少码率」因机器/驱动而异，无法查表：同一份代码在一台机器上
+    // 200 Mbps 正常、在另一台上直接 `incompatible video parameters (-14)`
+    // （`tests/hw_bitrate_limit` 记录了两种机器的实测差异）。所以这里在启动时
+    // 让编码器自己投票：二分搜索出「建得出**并且**能编出一帧」的最高码率。
+    //
+    // 只建不编不够 —— 现场那次崩溃正发生在 `avcodec_send_frame`，编码器是建成功的。
+    static H264_MAX_KBPS: AtomicU32 = AtomicU32::new(0);
+    static H265_MAX_KBPS: AtomicU32 = AtomicU32::new(0);
+    /// 建不出来 / 编不出的最低码率（kbps）。生效上限取它的下一个可用值。
+    static H264_BAD_KBPS: AtomicU32 = AtomicU32::new(0);
+    static H265_BAD_KBPS: AtomicU32 = AtomicU32::new(0);
+
+    /// 探测的搜索区间（kbps）。这是**搜索范围**，不是策略上限 ——
+    /// 真正生效的值由编码器自己决定。
+    const MAX_BITRATE_SEARCH_LOW: u32 = 1_000;
+    const MAX_BITRATE_SEARCH_HIGH: u32 = 200_000;
+
+    fn max_slot(codec: crate::video::vpx::SosCodec) -> Option<&'static AtomicU32> {
+        use crate::video::vpx::SosCodec;
+        match codec {
+            SosCodec::H264 => Some(&H264_MAX_KBPS),
+            SosCodec::H265 => Some(&H265_MAX_KBPS),
+            _ => None,
+        }
+    }
+
+    fn bad_slot(codec: crate::video::vpx::SosCodec) -> Option<&'static AtomicU32> {
+        use crate::video::vpx::SosCodec;
+        match codec {
+            SosCodec::H264 => Some(&H264_BAD_KBPS),
+            SosCodec::H265 => Some(&H265_BAD_KBPS),
+            _ => None,
+        }
+    }
+
+    /// 该编码器实测的码率上限（kbps）。`None` = 还不知道，调用方不做钳制。
+    ///
+    /// 结果同时受两个来源约束：探测到的最高可用值，以及运行中失败的更低值
+    /// （建不出来或编不出时记录，见 [`Self::record_rejected_kbps`]）。
+    pub fn max_bitrate_kbps(codec: crate::video::vpx::SosCodec) -> Option<u32> {
+        let ok = max_slot(codec)
+            .map(|a| a.load(Ordering::Relaxed))
+            .filter(|v| *v > 0);
+        let bad = bad_slot(codec)
+            .map(|a| a.load(Ordering::Relaxed))
+            .filter(|v| *v > 0);
+        match (ok, bad) {
+            // 失败点比已知可用点更低 ⇒ 以失败点为准（留一格）
+            (Some(ok), Some(bad)) => Some(ok.min(bad.saturating_sub(1))),
+            (Some(ok), None) => Some(ok),
+            (None, Some(bad)) => Some(bad.saturating_sub(1)),
+            (None, None) => None,
+        }
+    }
+
+    /// 记录一个**失败**的码率：生效上限会被压到它下面。
+    fn record_rejected_kbps(codec: crate::video::vpx::SosCodec, kbps: u32) {
+        if let Some(slot) = bad_slot(codec) {
+            let mut cur = slot.load(Ordering::Relaxed);
+            while cur == 0 || kbps < cur {
+                match slot.compare_exchange_weak(cur, kbps, Ordering::Relaxed, Ordering::Relaxed) {
+                    Ok(_) => break,
+                    Err(actual) => cur = actual,
+                }
+            }
+        }
+    }
+
+    /// 某个码率能不能真的用起来：建得出编码器**并且**能编出一帧。
+    fn bitrate_works(name: &str, width: usize, height: usize, kbps: u32) -> bool {
+        let Ok(mut encoder) = SosHwEncoder::build(name, width, height, kbps, 60) else {
+            return false;
+        };
+        // 按编码器自己给的布局造一帧 NV12（Y 有渐变、色度中性），编出去看结果。
+        let stride_y = encoder.linesize[0] as usize;
+        let stride_uv = *encoder.linesize.get(1).unwrap_or(&(stride_y as i32)) as usize;
+        let end_u = encoder.offset[0] as usize + stride_uv * (height / 2).max(1);
+        let end_v = encoder.offset[1] as usize + stride_uv * (height / 2).max(1);
+        let mut buf = vec![128u8; end_u.max(end_v).max(stride_y * height).max(width * height)];
+        for row in 0..height {
+            let dst = row * stride_y;
+            if dst + width <= buf.len() {
+                buf[dst..dst + width].fill((row % 251) as u8);
+            }
+        }
+        encoder.encode(&buf, 33).is_ok()
+    }
+
+    /// 二分搜索该编码器能吃下的最高码率，成功后写入 [`Self::max_bitrate_kbps`] 的状态。
+    fn probe_max_bitrate(codec: crate::video::vpx::SosCodec, name: &str, width: usize, height: usize) {
+        if name.is_empty() {
+            return;
+        }
+        let start = std::time::Instant::now();
+        let mut lo = MAX_BITRATE_SEARCH_LOW;
+        if !bitrate_works(name, width, height, lo) {
+            // 连最低档都用不了，说明这台机器的失败与码率无关，不发布上限。
+            log::warn!("[HWENC] {} rejected even {}kbps, skip bitrate probe", name, lo);
+            return;
+        }
+        let mut hi = MAX_BITRATE_SEARCH_HIGH;
+        if bitrate_works(name, width, height, hi) {
+            lo = hi;
+        } else {
+            // 区间收敛到 2 Mbps 就够用了：再细分对码率选择没有意义。
+            while hi - lo > 2_000 {
+                let mid = lo + (hi - lo) / 2;
+                if bitrate_works(name, width, height, mid) {
+                    lo = mid;
+                } else {
+                    hi = mid;
+                }
+            }
+        }
+        if let Some(slot) = max_slot(codec) {
+            slot.store(lo, Ordering::Relaxed);
+        }
+        log::info!(
+            "[HWENC] {} max bitrate probed {}kbps at {}x{} (took {:?})",
+            name,
+            lo,
+            width,
+            height,
+            start.elapsed()
+        );
+    }
+
     /// 启动时探测可用硬件编码器（后台线程，不阻塞启动）。
     ///
     /// 上游把探测放在**独立子进程**里跑（`--check-hwcodec-config`），因为「试编码一次」
@@ -161,6 +290,28 @@ mod enabled {
                 };
                 report("H.264", infos.h264.as_ref(), &H264_STATE, &H264_NAME);
                 report("H.265", infos.h265.as_ref(), &H265_STATE, &H265_NAME);
+
+                // 码率上限放在**可用性发布之后**再测：那要额外建/编十几次编码器
+                // （数百毫秒到数秒），不能让「硬件编码什么时候生效」等它。
+                // 测完之前 `max_bitrate_kbps()` 返回 None，调用方不做钳制，
+                // 真遇到吃不下时还有 `SosHwEncoder::new` 的减半重试兜底。
+                let probe_size = (1920usize, 1080usize);
+                if let Some(info) = infos.h264.as_ref() {
+                    probe_max_bitrate(
+                        crate::video::vpx::SosCodec::H264,
+                        &info.name,
+                        probe_size.0,
+                        probe_size.1,
+                    );
+                }
+                if let Some(info) = infos.h265.as_ref() {
+                    probe_max_bitrate(
+                        crate::video::vpx::SosCodec::H265,
+                        &info.name,
+                        probe_size.0,
+                        probe_size.1,
+                    );
+                }
             });
         if let Err(e) = spawned {
             log::warn!("[HWENC] failed to spawn probe thread: {}", e);
@@ -205,7 +356,43 @@ mod enabled {
             // 不设会让 GOP 变成 `i32::MAX`：只有「重建编码器」那一刻才出关键帧，
             // 中途接入的控制端要等到下一次重建才拿得到 IDR。
             let gop = keyframe_interval.max(1) as i32;
-            let encoder = Self::build(&name, width, height, kbps, gop)?;
+            // 钳到实测上限（可能还没测出来，那就是 None = 不钳）
+            let mut kbps = match max_bitrate_kbps(codec) {
+                Some(max) if kbps > max => {
+                    log::info!(
+                        "[HWENC] {} requested {}kbps above probed max {}kbps, clamping",
+                        name,
+                        kbps,
+                        max
+                    );
+                    max
+                }
+                _ => kbps,
+            };
+            // 吃不下就减半重试：探测是**在 1080p 上做的**，实际分辨率/帧率不同
+            // 时上限也会变，所以运行期还得留一条兜底路径。
+            let mut attempt = 0;
+            let encoder = loop {
+                match Self::build(&name, width, height, kbps, gop) {
+                    Ok(enc) => break enc,
+                    Err(e) => {
+                        record_rejected_kbps(codec, kbps);
+                        if attempt >= 3 || kbps <= 1_000 {
+                            return Err(e);
+                        }
+                        let next = (kbps / 2).max(1_000);
+                        log::warn!(
+                            "[HWENC] {} cannot run at {}kbps ({}), retrying at {}kbps",
+                            name,
+                            kbps,
+                            e,
+                            next
+                        );
+                        kbps = next;
+                        attempt += 1;
+                    }
+                }
+            };
             log::info!(
                 "[HWENC] {} {}x{} {}kbps gop={} stride={:?}",
                 name,
@@ -290,13 +477,20 @@ mod enabled {
 
         /// 运行期改码率（硬件编码器直接吃绝对 kbps，不需要换算成 `quality` 比例）。
         pub fn tune(&mut self, kbps: u32) -> ResultType<()> {
+            // 与 `new` 同一套钳制：运行期的码率更新走的是这里，不钳制等于上限失效。
+            let kbps = match max_bitrate_kbps(self.codec) {
+                Some(max) if kbps > max => max,
+                _ => kbps,
+            };
             if kbps == self.kbps {
                 return Ok(());
             }
             self.kbps = kbps;
-            self.encoder
-                .set_bitrate(kbps as i32)
-                .map_err(|_| anyhow::anyhow!("failed to set bitrate {}kbps", kbps))
+            self.encoder.set_bitrate(kbps as i32).map_err(|_| {
+                // 设置失败也说明这个码率用不了：记下来，后续创建/更新都会被压低。
+                record_rejected_kbps(self.codec, kbps);
+                anyhow::anyhow!("failed to set bitrate {}kbps", kbps)
+            })
         }
 
         /// 请求下一帧为关键帧。
@@ -368,6 +562,11 @@ mod disabled {
     /// 与真实实现同名同签名；构造永远失败，调用方会回退 VP9。
     pub struct SosHwEncoder;
 
+        /// 没有硬件编码器 ⇒ 没有码率上限可言（调用方不做钳制）。
+    pub fn max_bitrate_kbps(_codec: crate::video::vpx::SosCodec) -> Option<u32> {
+        None
+    }
+
     impl SosHwEncoder {
         pub fn new(
             _codec: crate::video::vpx::SosCodec,
@@ -420,10 +619,10 @@ mod disabled {
 #[cfg(feature = "hwcodec")]
 pub use enabled::{
     available, available_h265, encoder_name, encoder_name_h265, mark_unavailable,
-    mark_unavailable_h265, probe_async, SosHwEncoder,
+    mark_unavailable_h265, max_bitrate_kbps, probe_async, SosHwEncoder,
 };
 #[cfg(not(feature = "hwcodec"))]
 pub use disabled::{
     available, available_h265, encoder_name, encoder_name_h265, mark_unavailable,
-    mark_unavailable_h265, probe_async, SosHwEncoder,
+    mark_unavailable_h265, max_bitrate_kbps, probe_async, SosHwEncoder,
 };

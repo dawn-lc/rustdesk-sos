@@ -66,6 +66,19 @@ fn hw_encoder_bitrate_ceiling() {
         2_500u32, 10_000, 20_000, 40_000, 60_000, 100_000, 200_000,
     ];
 
+    // 探测线程会自己二分搜索码率上限（可用性发布之后才跑，可能要几秒）
+    let deadline2 = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while std::time::Instant::now() < deadline2
+        && (sos_hwenc::max_bitrate_kbps(SosCodec::H264).is_none()
+            || sos_hwenc::max_bitrate_kbps(SosCodec::H265).is_none())
+    {
+        std::thread::sleep(std::time::Duration::from_millis(300));
+    }
+    println!(
+        "[HW_BR] probed cap: H264={:?} H265={:?}",
+        sos_hwenc::max_bitrate_kbps(SosCodec::H264),
+        sos_hwenc::max_bitrate_kbps(SosCodec::H265)
+    );
     println!("[HW_BR] resolution {w}x{h}");
     for codec in [SosCodec::H264, SosCodec::H265] {
         for kbps in probes {
