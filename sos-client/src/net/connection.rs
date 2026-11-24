@@ -749,6 +749,12 @@ async fn send_login_response(
     });
     let mut encoding = scrap::codec::Encoder::supported_encoding();
     encoding.av1 = false;
+    // H.265 同理显式钉死。这行不是冗余：上游 `supported_encoding()` 里那句
+    // `encoding.h265 |= HwRamEncoder::try_get(H265).is_some()` 目前**没有**编进来
+    // （`scrap` 的 `hwcodec` feature 在 SOS 构建里未启用，我们直接依赖 hwcodec crate），
+    // 所以现状恰好是 false；一旦有人给 scrap 打开那个 feature，本端就会开始谎报
+    // 支持 H.265 —— 而 `SosCodec` 根本没有 H265 变体。显式写死让这个声明与实现解耦。
+    encoding.h265 = false;
     // H.264 只有硬件编码（见 `video::hwenc`）。只在**本机真的有可用编码器**时才声明：
     // 声明了却没有实现，控制端会显示 H.264 选项、用户选了却仍旧收到 VP9 码流。
     encoding.h264 = crate::video::hw_available();
