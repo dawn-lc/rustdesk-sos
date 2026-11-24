@@ -31,6 +31,12 @@ pub enum SosCodec {
     /// H.264 **只有硬件编码**（`hwcodec` 的 nvenc/qsv/amf，见 `crate::video::hwenc`）。
     /// libvpx 侧没有 H.264 实现，所以 `SosVpxEncoder::new` 遇到它会返回错误。
     H264,
+    /// H.265 / HEVC **同样只有硬件编码**（`hevc_nvenc` / `hevc_qsv` / `hevc_amf`）。
+    ///
+    /// 与 H.264 走完全相同的路径（NV12 RAM、重建编码器实现强制 IDR、无编码器内丢帧），
+    /// 差别只在码流标识：必须用 `VideoFrame.h265s` 而不是 `h264s` ——
+    /// 用错字段控制端会按 H.264 解 H.265 码流，直接花屏。
+    H265,
 }
 
 /// 控制端的编码偏好，对应协议里的 `SupportedDecoding.prefer`。
@@ -44,6 +50,7 @@ pub enum CodecPrefer {
     Vp8,
     Vp9,
     H264,
+    H265,
 }
 
 impl CodecPrefer {
@@ -54,6 +61,7 @@ impl CodecPrefer {
             Self::Vp8 => 1,
             Self::Vp9 => 2,
             Self::H264 => 3,
+            Self::H265 => 4,
         }
     }
 
@@ -62,6 +70,7 @@ impl CodecPrefer {
             1 => Self::Vp8,
             2 => Self::Vp9,
             3 => Self::H264,
+            4 => Self::H265,
             _ => Self::Auto,
         }
     }
@@ -122,9 +131,11 @@ pub fn choose_codec(peer_vp8: bool, peer_vp9: bool, prefer: CodecPrefer) -> SosC
     }
     match prefer {
         CodecPrefer::Vp8 => SosCodec::Vp8,
-        // 走到这里说明 H.264 硬件编码不可用（`video` 只在能用硬件时选它），
+        // 走到这里说明 H.264 / H.265 硬件编码都不可用（`video` 只在能用硬件时选它们），
         // 按 `Auto` 处理：软件编码里 VP9 速度与画质同时更优。
-        CodecPrefer::Vp9 | CodecPrefer::Auto | CodecPrefer::H264 => SosCodec::Vp9,
+        CodecPrefer::Vp9 | CodecPrefer::Auto | CodecPrefer::H264 | CodecPrefer::H265 => {
+            SosCodec::Vp9
+        }
     }
 }
 
@@ -419,8 +430,11 @@ impl SosCodec {
             match self {
                 SosCodec::Vp8 => Ok(vpx_codec_vp8_cx()),
                 SosCodec::Vp9 => Ok(vpx_codec_vp9_cx()),
-                SosCodec::H264 => {
-                    anyhow::bail!("H.264 is hardware-only, libvpx has no such interface")
+                SosCodec::H264 | SosCodec::H265 => {
+                    anyhow::bail!(
+                        "{:?} is hardware-only, libvpx has no such interface",
+                        self
+                    )
                 }
             }
         }
@@ -604,7 +618,7 @@ impl SosVpxConfig {
                 }
             }
             // 硬件编码没有 cpu-used 这个旋钮（见 `video::hwenc`）
-            SosCodec::H264 => 0,
+            SosCodec::H264 | SosCodec::H265 => 0,
         }
     }
 
@@ -1086,8 +1100,11 @@ impl SosVpxEncoder {
                         );
                     }
                 }
-                SosCodec::H264 => {
-                    anyhow::bail!("H.264 must go through the hardware backend (video::hwenc)")
+                SosCodec::H264 | SosCodec::H265 => {
+                    anyhow::bail!(
+                        "{:?} must go through the hardware backend (video::hwenc)",
+                        cfg.codec
+                    )
                 }
             }
 

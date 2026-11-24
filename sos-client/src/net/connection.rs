@@ -234,8 +234,13 @@ pub async fn handle(
         is_file_transfer,
         video_ack_required
     );
-    // 把控制端声明的解码能力转交给自建视频链路，用于选择编码格式
-    register_peer_decoding(&authorized_req);
+    // 握手期的控制端选项：解码能力决定编码格式，画质/帧率决定码率预算。
+    //
+    // 画质必须在这里就应用：控制端**只在握手与用户改档两处发画质**（上游
+    // `src/client.rs` 的 `get_option_message(true)` 与会话中改档路径），不会周期性重发。
+    // 漏掉这一处，用户默认档位是 best / low / 自定义时，本端会一直停在
+    // Balanced(0.67)，直到用户手动动一次画质菜单 —— 表现为「第一次调画质没反应」。
+    register_peer_options(conn_id, &authorized_req);
     // 控制端平台用于能力声明（见 `send_login_response` 里的
     // `has_file_clipboard`）。旧客户端不带这个字段，取到空串。
     let peer_platform = authorized_req.my_platform.clone();
@@ -754,7 +759,9 @@ async fn send_login_response(
     // （`scrap` 的 `hwcodec` feature 在 SOS 构建里未启用，我们直接依赖 hwcodec crate），
     // 所以现状恰好是 false；一旦有人给 scrap 打开那个 feature，本端就会开始谎报
     // 支持 H.265 —— 而 `SosCodec` 根本没有 H265 变体。显式写死让这个声明与实现解耦。
-    encoding.h265 = false;
+    // H.265 同样门控在本机真的有 HEVC 编码器：见 `video::hwenc::available_h265`。
+    // 两种硬件编码器是独立探测的，所以这里用各自的结论，不要拿 h264 的结果顶替。
+    encoding.h265 = crate::video::hw_available_h265();
     // H.264 只有硬件编码（见 `video::hwenc`）。只在**本机真的有可用编码器**时才声明：
     // 声明了却没有实现，控制端会显示 H.264 选项、用户选了却仍旧收到 VP9 码流。
     encoding.h264 = crate::video::hw_available();
@@ -764,6 +771,12 @@ async fn send_login_response(
         log::info!(
             "[HWENC] announcing h264 via {}",
             crate::video::hwenc::encoder_name()
+        );
+    }
+    if encoding.h265 {
+        log::info!(
+            "[HWENC] announcing h265 via {}",
+            crate::video::hwenc::encoder_name_h265()
         );
     }
     // 我们的编码链路**只有 I420**（`video::vpx` 固定 `VPX_IMG_FMT_I420`），
@@ -1930,6 +1943,7 @@ fn codec_prefer_of(
     match sd.prefer.enum_value() {
         Ok(PreferCodec::VP8) => CodecPrefer::Vp8,
         Ok(PreferCodec::VP9) => CodecPrefer::Vp9,
+        Ok(PreferCodec::H265) => CodecPrefer::H265,
         Ok(PreferCodec::Auto) => CodecPrefer::Auto,
         Ok(other) => {
             log::info!(
@@ -1942,24 +1956,59 @@ fn codec_prefer_of(
     }
 }
 
-/// 把控制端声明的解码能力转交给 `video` 用于选择编码格式。
+/// 应用握手期控制端选项：解码能力（选编码格式）+ 画质/帧率（定码率预算）。
 ///
 /// 自建视频链路不使用 `scrap` 的编码器，因此无需维护其 `PEER_DECODINGS`。
-fn register_peer_decoding(lr: &base::message_proto::LoginRequest) {
+///
+/// 画质部分与运行期 `Misc::Option` 的处理（`handle_incoming_message`）语义一致：
+/// 枚举优先，`NotSet` 才看自定义值 —— 两者解析的是同一个 `OptionMessage`，
+/// 只是到达时机不同（登录握手 vs 会话中）。上游同样把整条 login option 交给
+/// `update_options`（`src/server/connection.rs`），不会漏掉画质。
+fn register_peer_options(conn_id: i32, lr: &base::message_proto::LoginRequest) {
+    if let Some(opt) = lr.option.as_ref() {
+        if opt.custom_fps > 0 {
+            crate::video::qos::with(|q| q.set_custom_fps(conn_id, opt.custom_fps as u32));
+        }
+        if let Ok(q) = opt.image_quality.enum_value() {
+            use base::message_proto::ImageQuality;
+            let v = if q == ImageQuality::NotSet {
+                opt.custom_image_quality
+            } else {
+                q as i32
+            };
+            if v > 0 {
+                log::info!(
+                    "[VIDEO] image quality from conn #{} (login): enum={:?} custom={} -> {}",
+                    conn_id,
+                    q,
+                    opt.custom_image_quality,
+                    v
+                );
+                crate::video::qos::with(|q| q.set_image_quality(conn_id, v));
+            }
+        }
+    }
     let sd = lr
         .option
         .as_ref()
         .and_then(|o| o.supported_decoding.as_ref());
-    let (vp8, vp9, h264, prefer) = match sd {
+    let (vp8, vp9, h264, h265, prefer) = match sd {
         Some(sd) => (
             sd.ability_vp8 > 0,
             sd.ability_vp9 > 0,
             sd.ability_h264 > 0,
+            sd.ability_h265 > 0,
             codec_prefer_of(sd),
         ),
-        None => (true, true, false, crate::video::vpx::CodecPrefer::Auto),
+        None => (
+            true,
+            true,
+            false,
+            false,
+            crate::video::vpx::CodecPrefer::Auto,
+        ),
     };
-    crate::video::set_peer_codec_ability(vp8, vp9, h264, prefer);
+    crate::video::set_peer_codec_ability(vp8, vp9, h264, h265, prefer);
 }
 
 /// 处理接收到的远程消息
@@ -2137,6 +2186,7 @@ async fn handle_incoming_message(
                     sd.ability_vp8 > 0,
                     sd.ability_vp9 > 0,
                     sd.ability_h264 > 0,
+                    sd.ability_h265 > 0,
                     codec_prefer_of(&sd),
                 );
             }

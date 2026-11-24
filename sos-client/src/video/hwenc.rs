@@ -52,24 +52,54 @@ mod enabled {
     /// `Encoder::available_encoders` 会真的去建一遍编码器（试编码一帧），单次几百毫秒到
     /// 数秒。而 `available()` 会被 `[VID_FPS]` 这类周期性日志路径间接调用，不缓存就等于
     /// 每隔几秒重探一次。
-    static STATE: AtomicU8 = AtomicU8::new(UNKNOWN);
+    static H264_STATE: AtomicU8 = AtomicU8::new(UNKNOWN);
 
     /// 探测到的编码器名字（`h264_amf` / `h264_nvenc` / `h264_qsv`），未探测时为空。
-    static NAME: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+    static H264_NAME: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
 
-    /// 当前是否可用。**探测完成前一律返回 false**（保守：宁可用软件编码，也不要赌）。
+    /// H.265 那一套（`hevc_amf` / `hevc_nvenc` / `hevc_qsv`）。
+    ///
+    /// 两种编码器**各自独立**地判可用：机器上可能有 HEVC 而没有 H.264（或反之），
+    /// 混用一个开关会让其中一种被错误地整体禁用。
+    static H265_STATE: AtomicU8 = AtomicU8::new(UNKNOWN);
+    static H265_NAME: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+
+    fn is_available(state: &AtomicU8) -> bool {
+        state.load(Ordering::Relaxed) == AVAILABLE
+    }
+
+    fn name_of(name: &std::sync::Mutex<String>) -> String {
+        name.lock().map(|n| n.clone()).unwrap_or_default()
+    }
+
+    /// 当前是否可用（H.264）。**探测完成前一律返回 false**（保守：宁可用软件编码，也不要赌）。
     pub fn available() -> bool {
-        STATE.load(Ordering::Relaxed) == AVAILABLE
+        is_available(&H264_STATE)
     }
 
-    /// 会话级关闭硬件编码（初始化失败时调用），之后不再尝试。
+    /// H.265 硬件编码是否可用（同样是探测结论，未探测时为 false）。
+    pub fn available_h265() -> bool {
+        is_available(&H265_STATE)
+    }
+
+    /// 会话级关闭 H.264 硬件编码（初始化失败时调用），之后不再尝试。
     pub fn mark_unavailable() {
-        STATE.store(UNAVAILABLE, Ordering::Relaxed);
+        H264_STATE.store(UNAVAILABLE, Ordering::Relaxed);
     }
 
-    /// 选中的硬件编码器名字（诊断用，例如 `h264_amf`）。
+    /// 会话级关闭 H.265 硬件编码（初始化失败时调用）。不影响 H.264。
+    pub fn mark_unavailable_h265() {
+        H265_STATE.store(UNAVAILABLE, Ordering::Relaxed);
+    }
+
+    /// 选中的 H.264 硬件编码器名字（诊断用，例如 `h264_amf`）。
     pub fn encoder_name() -> String {
-        NAME.lock().map(|n| n.clone()).unwrap_or_default()
+        name_of(&H264_NAME)
+    }
+
+    /// 选中的 H.265 硬件编码器名字（诊断用，例如 `hevc_amf`）。
+    pub fn encoder_name_h265() -> String {
+        name_of(&H265_NAME)
     }
 
     /// 启动时探测可用硬件编码器（后台线程，不阻塞启动）。
@@ -100,32 +130,50 @@ mod enabled {
                     q: -1,
                     thread_count: DEFAULT_THREADS,
                 };
-                let best = CodecInfo::prioritized(Encoder::available_encoders(ctx, None));
-                match best.h264 {
-                    Some(info) => {
-                        if let Ok(mut name) = NAME.lock() {
-                            *name = info.name.clone();
+                // 一次探测得出两个结论：`available_encoders` 本来就同时枚举 h264 与 hevc，
+                // 没必要为了 H.265 再建一遍编码器（那是几百毫秒到数秒的开销）。
+                let infos = CodecInfo::prioritized(Encoder::available_encoders(ctx, None));
+                let report = |label: &str,
+                                  info: Option<&CodecInfo>,
+                                  state: &AtomicU8,
+                                  name: &std::sync::Mutex<String>| {
+                    match info {
+                        Some(info) => {
+                            if let Ok(mut slot) = name.lock() {
+                                *slot = info.name.clone();
+                            }
+                            state.store(AVAILABLE, Ordering::Relaxed);
+                            log::info!(
+                                "[HWENC] {} available (probe took {:?})",
+                                info.name,
+                                start.elapsed()
+                            );
                         }
-                        STATE.store(AVAILABLE, Ordering::Relaxed);
-                        log::info!(
-                            "[HWENC] {} available (probe took {:?})",
-                            info.name,
-                            start.elapsed()
-                        );
+                        None => {
+                            state.store(UNAVAILABLE, Ordering::Relaxed);
+                            log::info!(
+                                "[HWENC] no hardware {} encoder (probe took {:?})",
+                                label,
+                                start.elapsed()
+                            );
+                        }
                     }
-                    None => {
-                        STATE.store(UNAVAILABLE, Ordering::Relaxed);
-                        log::info!("[HWENC] no hardware H.264 encoder (probe took {:?})", start.elapsed());
-                    }
-                }
+                };
+                report("H.264", infos.h264.as_ref(), &H264_STATE, &H264_NAME);
+                report("H.265", infos.h265.as_ref(), &H265_STATE, &H265_NAME);
             });
         if let Err(e) = spawned {
             log::warn!("[HWENC] failed to spawn probe thread: {}", e);
         }
     }
 
-    /// 硬件 H.264 编码器。
+    /// 硬件编码器（H.264 或 H.265，由 `codec` 区分）。
     pub struct SosHwEncoder {
+        /// 本实例产出的码流格式。
+        ///
+        /// 必须随实例一起保存：上层要用它决定把码流放进 `VideoFrame` 的哪个字段
+        /// （`h264s` / `h265s`）。放错字段控制端会按错误的格式解码。
+        codec: crate::video::vpx::SosCodec,
         name: String,
         width: usize,
         height: usize,
@@ -137,14 +185,21 @@ mod enabled {
 
     impl SosHwEncoder {
         pub fn new(
+            codec: crate::video::vpx::SosCodec,
             width: usize,
             height: usize,
             kbps: u32,
             keyframe_interval: usize,
         ) -> ResultType<Self> {
-            let name = encoder_name();
+            use crate::video::vpx::SosCodec;
+            let (name, label) = match codec {
+                SosCodec::H264 => (encoder_name(), "H.264"),
+                SosCodec::H265 => (encoder_name_h265(), "H.265"),
+                // 只有这两种走硬件后端（`video::ActiveEncoder` 保证）
+                _ => anyhow::bail!("{:?} is not a hardware codec", codec),
+            };
             if name.is_empty() {
-                anyhow::bail!("no H.264 hardware encoder available");
+                anyhow::bail!("no {} hardware encoder available", label);
             }
             // 与 VP9 保持一致的周期 IDR（数的是**送进编码器的帧数**，不是墙钟）。
             // 不设会让 GOP 变成 `i32::MAX`：只有「重建编码器」那一刻才出关键帧，
@@ -161,6 +216,7 @@ mod enabled {
                 encoder.linesize
             );
             Ok(Self {
+                codec,
                 name,
                 width,
                 height,
@@ -168,6 +224,11 @@ mod enabled {
                 encoder,
                 kbps,
             })
+        }
+
+        /// 本实例产出的码流格式（上层据此选 `h264s` / `h265s`）。
+        pub fn codec(&self) -> crate::video::vpx::SosCodec {
+            self.codec
         }
 
         fn build(
@@ -284,7 +345,21 @@ mod disabled {
         false
     }
 
+    pub fn available_h265() -> bool {
+        false
+    }
+
     pub fn mark_unavailable() {}
+
+    pub fn mark_unavailable_h265() {}
+
+    pub fn encoder_name_h265() -> String {
+        String::new()
+    }
+
+    pub fn encoder_name() -> String {
+        String::new()
+    }
 
     pub fn probe_async() {
         log::info!("[HWENC] built without the `hwcodec` feature, software encoding only");
@@ -295,12 +370,17 @@ mod disabled {
 
     impl SosHwEncoder {
         pub fn new(
+            _codec: crate::video::vpx::SosCodec,
             _width: usize,
             _height: usize,
             _kbps: u32,
             _keyframe_interval: usize,
         ) -> ResultType<Self> {
             anyhow::bail!("built without the `hwcodec` feature")
+        }
+
+        pub fn codec(&self) -> crate::video::vpx::SosCodec {
+            crate::video::vpx::SosCodec::H264
         }
 
         /// 桩永远不会被 `Frame::to()` 真正使用（构造必然失败），返回一个空布局即可。
@@ -338,6 +418,12 @@ mod disabled {
 }
 
 #[cfg(feature = "hwcodec")]
-pub use enabled::{available, encoder_name, mark_unavailable, probe_async, SosHwEncoder};
+pub use enabled::{
+    available, available_h265, encoder_name, encoder_name_h265, mark_unavailable,
+    mark_unavailable_h265, probe_async, SosHwEncoder,
+};
 #[cfg(not(feature = "hwcodec"))]
-pub use disabled::{available, mark_unavailable, probe_async, SosHwEncoder};
+pub use disabled::{
+    available, available_h265, encoder_name, encoder_name_h265, mark_unavailable,
+    mark_unavailable_h265, probe_async, SosHwEncoder,
+};

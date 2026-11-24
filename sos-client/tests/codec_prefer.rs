@@ -17,6 +17,7 @@
 use rustdesk_sos::video::vpx as sos_vpx;
 
 use sos_vpx::{choose_codec, codec_with_degradation, CodecPrefer, SosCodec};
+use rustdesk_sos::video::pick_codec;
 
 /// 最关键的一条：能力都支持时，`prefer` 必须生效。
 #[test]
@@ -82,7 +83,13 @@ fn auto_is_always_vp9() {
 /// 偏好值的存取必须可逆（它被存进静态变量的 i32 槽位）。
 #[test]
 fn prefer_roundtrip() {
-    for p in [CodecPrefer::Auto, CodecPrefer::Vp8, CodecPrefer::Vp9] {
+    for p in [
+        CodecPrefer::Auto,
+        CodecPrefer::Vp8,
+        CodecPrefer::Vp9,
+        CodecPrefer::H264,
+        CodecPrefer::H265,
+    ] {
         assert_eq!(CodecPrefer::from_i32(p.to_i32()), p);
     }
     // 未知值一律回落到 Auto
@@ -161,4 +168,104 @@ fn degradation_only_affects_auto() {
     let explicit_hi = codec_with_degradation(true, true, CodecPrefer::Vp9, 2);
     let explicit_lo = codec_with_degradation(true, true, CodecPrefer::Vp9, 0);
     assert_eq!(explicit_hi, explicit_lo, "显式偏好不应随降级档位改变");
+}
+
+// ── 硬件编码的选码决策（H.264 / H.265）──
+
+/// 硬件格式的优先级与上游一致：上游源码注释原话是 `auto: h265 > h264 > av1/vp9/vp8`。
+///
+/// 选 H.265 的理由不是「更新」，而是**同硬件同画质下省约 25-40% 带宽**，
+/// 编码成本与 H.264 相同（都是 GPU）。所以只要对端能解，Auto 就该选它。
+#[test]
+fn auto_prefers_h265_over_h264() {
+    // 两种硬件都有、对端都能解 → 选 H.265
+    assert_eq!(
+        pick_codec(true, true, true, true, true, true, CodecPrefer::Auto, 0),
+        SosCodec::H265,
+        "Auto 下 H.265 应优先于 H.264（上游同款规则）"
+    );
+    // 只有 H.264 → 回落 H.264
+    assert_eq!(
+        pick_codec(true, true, true, true, true, false, CodecPrefer::Auto, 0),
+        SosCodec::H264,
+        "没有 HEVC 编码器时必须用 H.264"
+    );
+    // 都没有 → 软件 VP9
+    assert_eq!(
+        pick_codec(true, true, true, true, false, false, CodecPrefer::Auto, 0),
+        SosCodec::Vp9,
+        "没有硬件编码器时必须回软件"
+    );
+}
+
+/// 对端解不了 H.265 时**绝不能**发 H.265：那会让控制端黑屏/花屏。
+#[test]
+fn peer_without_h265_never_gets_h265() {
+    // 本机有 HEVC 编码器，但对端 ability_h265 == 0
+    assert_ne!(
+        pick_codec(true, true, true, false, true, true, CodecPrefer::Auto, 0),
+        SosCodec::H265,
+        "对端没有 H.265 解码能力时不能选 H.265"
+    );
+    // 即使控制端明确 prefer=H265（协议允许它这么声明），能力为 0 时也不能从
+    assert_ne!(
+        pick_codec(true, true, true, false, true, true, CodecPrefer::H265, 0),
+        SosCodec::H265,
+        "prefer 与 ability 冲突时以 ability 为准"
+    );
+}
+
+/// 显式偏好优先于 Auto 的默认顺序。
+#[test]
+fn explicit_hw_preference_wins() {
+    // 两种都有，但用户点名 H.264 → 用 H.264，不能被 Auto 的 H.265 覆盖
+    assert_eq!(
+        pick_codec(true, true, true, true, true, true, CodecPrefer::H264, 0),
+        SosCodec::H264,
+        "用户显式选 H.264 时必须用 H.264"
+    );
+    // 用户点名 H.265 且可用 → H.265
+    assert_eq!(
+        pick_codec(true, true, true, true, true, true, CodecPrefer::H265, 0),
+        SosCodec::H265
+    );
+}
+
+/// 点名的硬件格式不可用时退回 Auto 规则，不能停在不可用的选择上。
+#[test]
+fn unavailable_hw_preference_falls_back() {
+    // 要 H.265 但没有 HEVC 编码器 → 退到 H.264（Auto 里次优的硬件）
+    assert_eq!(
+        pick_codec(true, true, true, true, true, false, CodecPrefer::H265, 0),
+        SosCodec::H264,
+        "H.265 不可用时应退到 H.264，而不是直接掉软件编码"
+    );
+    // 要 H.264 但没有 H.264 编码器，而 HEVC 可用 → Auto 规则给 H.265
+    assert_eq!(
+        pick_codec(true, true, true, true, false, true, CodecPrefer::H264, 0),
+        SosCodec::H265,
+        "H.264 不可用时应退到可用的 H.265"
+    );
+    // 两种硬件都没有 → 软件
+    assert_eq!(
+        pick_codec(true, true, true, true, false, false, CodecPrefer::H265, 0),
+        SosCodec::Vp9
+    );
+}
+
+/// 软件偏好不受硬件可用性影响（原有行为不能被 H.265 改动碰到）。
+#[test]
+fn software_preference_ignores_hw() {
+    for (h264, h265) in [(false, false), (true, false), (false, true), (true, true)] {
+        assert_eq!(
+            pick_codec(true, true, true, true, h264, h265, CodecPrefer::Vp8, 0),
+            SosCodec::Vp8,
+            "显式 VP8 不该被硬件编码器抢走（h264={h264} h265={h265}）"
+        );
+        assert_eq!(
+            pick_codec(true, true, true, true, h264, h265, CodecPrefer::Vp9, 0),
+            SosCodec::Vp9,
+            "显式 VP9 不该被硬件编码器抢走（h264={h264} h265={h265}）"
+        );
+    }
 }

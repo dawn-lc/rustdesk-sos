@@ -118,6 +118,7 @@ fn codec_name(c: SosCodec) -> &'static str {
         SosCodec::Vp8 => "VP8",
         SosCodec::Vp9 => "VP9",
         SosCodec::H264 => "H264",
+        SosCodec::H265 => "H265",
     }
 }
 

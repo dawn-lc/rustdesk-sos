@@ -204,7 +204,13 @@ fn bench_hw(w: usize, h: usize, frames: usize) -> Stat {
     }
     let name = sos_hwenc::encoder_name();
     // 目标码率取 `base_bitrate`（相当于上游的 quality=1.0 基准），与软件侧对齐。
-    let mut enc = match sos_hwenc::SosHwEncoder::new(w, h, base_bitrate(w as _, h as _), 60) {
+    let mut enc = match sos_hwenc::SosHwEncoder::new(
+        SosCodec::H264,
+        w,
+        h,
+        base_bitrate(w as _, h as _),
+        60,
+    ) {
         Ok(e) => e,
         Err(e) => {
             println!("[hw] create failed: {e}");

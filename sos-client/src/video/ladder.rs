@@ -142,7 +142,7 @@ pub fn reset_all_enc_levels() {
 /// `enc_avg_ms` 是**当前档位**的实测每帧编码耗时，换到 VP8 时用它做基线。
 pub fn step_down_encoder(display: usize, enc_avg_ms: f64) -> bool {
     let cur = enc_level(display);
-    let (peer_vp8, _, _, prefer) = peer_ability();
+    let (peer_vp8, _, _, _, prefer) = peer_ability();
     // 已实测「VP8 不划算」就不再试，直接停在当前档位。
     //
     // 显式偏好下也**不**做 VP8 试验：用户已经指定了格式，实测降级只应影响

@@ -472,10 +472,10 @@ ConnectionRefused = 降档；其余 = 重建（连续 5 次才降档）。
 - 选码时**不看 `ENC_LEVEL`**：那套阶梯是按「软件编码吃 CPU」标定的。
   反过来 `encoder_behind_budget` 的第一个条件 `enc > cap` 在硬件上**永远不成立**
   （提交耗时 <1ms，`cap` 约 5ms），所以降级阶梯对硬件后端天然空转 —— 这是设计，不是 bug。
-- 能力声明的门控：`encoding.h264 = hw_available()`。声明了却没有实现，控制端会显示
-  H.264 选项、用户选了却仍旧收到 VP9 码流；而 `prefer=H264` 在软件规则里会被当 `Auto`。
-- 硬件初始化失败要**回退软件编码**（`set_hw_unavailable()` + 用 VP9 重建），
-  不能让整条管线失败。
+- 能力声明的门控：`encoding.h264` / `encoding.h265` **各自独立探测**（`hw_available*`）；
+  声明了没实现 ⇒ 控制端出现选了没用的选项，`prefer=H264/H265` 在软件规则里当 `Auto`。
+- **H.265 与 H.264 并列**：选码纯函数 `video::pick_codec`（`Auto: H265 > H264 > VP9`，同上游）；
+  码流必须用 `h265s`（写错会花屏）；初始化失败 H.265 → H.264 → VP9 逐级回退。
 ### 码率控制（libvpx）
 
 - **`rc_buf_sz` / `rc_buf_initial_sz` / `rc_buf_optimal_sz` 单位是毫秒，不是比特。**

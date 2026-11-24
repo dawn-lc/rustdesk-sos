@@ -1176,7 +1176,9 @@ impl ActiveEncoder {
     fn codec(&self) -> SosCodec {
         match self {
             Self::Vpx(e) => e.codec(),
-            Self::Hw(_) => SosCodec::H264,
+            // 必须问编码器自己：H.264 与 H.265 共用这个变体，
+            // 写死 H264 会让 H.265 码流被塞进 `VideoFrame.h264s`，控制端直接花屏。
+            Self::Hw(e) => e.codec(),
         }
     }
 
@@ -1327,29 +1329,83 @@ impl CaptureState {
             bitrate_kbps: bitrate,
             keyframe_interval: Some(KEYFRAME_INTERVAL_FRAMES),
         };
-        // 硬件后端只出 H.264；其它格式一律走 libvpx。
+        // 硬件后端出 H.264 / H.265；其它格式一律走 libvpx。
         //
-        // 硬件初始化失败（驱动异常 / 会话数用满）时**回退软件编码**而不是让整条
-        // 管线失败：宁可这一屏画质差一点，也不能没有画面。
-        let mut encoder = if codec == SosCodec::H264 {
-            match crate::video::hwenc::SosHwEncoder::new(width, height, bitrate, KEYFRAME_INTERVAL_FRAMES) {
-                Ok(hw) => ActiveEncoder::Hw(hw),
-                Err(e) => {
-                    log::warn!(
-                        "[VIDEO] display #{} H.264 hardware encoder init failed ({}), falling back to VP9",
-                        slot,
-                        e
-                    );
-                    set_hw_unavailable();
-                    ActiveEncoder::Vpx(SosVpxEncoder::new(SosVpxConfig {
-                        codec: SosCodec::Vp9,
-                        cpu_used: SosVpxConfig::default_cpu_used(SosCodec::Vp9, width, height),
-                        ..cfg
-                    })?)
+        // 硬件初始化失败（驱动异常 / 会话数用满）时**逐级回退**而不是让整条管线失败：
+        // H.265 失败先退 H.264（若可用），再退 VP9。宁可画质差一点，也不能没有画面。
+        let build_sw = |codec: SosCodec, cfg: &SosVpxConfig| -> ResultType<ActiveEncoder> {
+            Ok(ActiveEncoder::Vpx(SosVpxEncoder::new(SosVpxConfig {
+                codec,
+                cpu_used: SosVpxConfig::default_cpu_used(codec, width, height),
+                ..cfg.clone()
+            })?))
+        };
+        let mut encoder = match codec {
+            SosCodec::H265 => {
+                match crate::video::hwenc::SosHwEncoder::new(
+                    SosCodec::H265,
+                    width,
+                    height,
+                    bitrate,
+                    KEYFRAME_INTERVAL_FRAMES,
+                ) {
+                    Ok(hw) => ActiveEncoder::Hw(hw),
+                    Err(e) => {
+                        log::warn!(
+                            "[VIDEO] display #{} H.265 hardware encoder init failed ({}), falling back",
+                            slot,
+                            e
+                        );
+                        // 只关掉 H.265，不要连带禁用 H.264 —— 两者是独立的编码器。
+                        crate::video::hwenc::mark_unavailable_h265();
+                        match crate::video::hwenc::SosHwEncoder::new(
+                            SosCodec::H264,
+                            width,
+                            height,
+                            bitrate,
+                            KEYFRAME_INTERVAL_FRAMES,
+                        ) {
+                            Ok(hw) => {
+                                log::info!(
+                                    "[VIDEO] display #{} falling back to H.264 hardware",
+                                    slot
+                                );
+                                ActiveEncoder::Hw(hw)
+                            }
+                            Err(e) => {
+                                log::warn!(
+                                    "[VIDEO] display #{} H.264 hardware also unavailable ({}), falling back to VP9",
+                                    slot,
+                                    e
+                                );
+                                set_hw_unavailable();
+                                build_sw(SosCodec::Vp9, &cfg)?
+                            }
+                        }
+                    }
                 }
             }
-        } else {
-            ActiveEncoder::Vpx(SosVpxEncoder::new(cfg)?)
+            SosCodec::H264 => {
+                match crate::video::hwenc::SosHwEncoder::new(
+                    SosCodec::H264,
+                    width,
+                    height,
+                    bitrate,
+                    KEYFRAME_INTERVAL_FRAMES,
+                ) {
+                    Ok(hw) => ActiveEncoder::Hw(hw),
+                    Err(e) => {
+                        log::warn!(
+                            "[VIDEO] display #{} H.264 hardware encoder init failed ({}), falling back to VP9",
+                            slot,
+                            e
+                        );
+                        set_hw_unavailable();
+                        build_sw(SosCodec::Vp9, &cfg)?
+                    }
+                }
+            }
+            _ => ActiveEncoder::Vpx(SosVpxEncoder::new(cfg)?),
         };
         // 新编码器默认是「守码率」水位；链路充裕时立即切成不丢帧，
         // 否则重建后的头一秒会白白丢一堆帧。
@@ -1396,6 +1452,9 @@ impl CaptureState {
             //H.264 用 `h264s` 字段（`message.proto` 的 tag 10）；
             // 关键帧必须 `key=true` 并自带 SPS/PPS，由 hwcodec 保证。
             SosCodec::H264 => vf.set_h264s(vpxs),
+            // H.265 必须用 `h265s`（tag 11）。用 `h264s` 会让控制端按 H.264 解，
+            // 表现为花屏而不是报错 —— 这类错误最难查，所以字段选择刻意写得很直白。
+            SosCodec::H265 => vf.set_h265s(vpxs),
         }
         // 控制端用这个索引把画面归到某块屏（与 `SwitchDisplay.display` 对应）
         vf.display = self.display_index as i32;

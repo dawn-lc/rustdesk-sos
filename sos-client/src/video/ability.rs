@@ -9,8 +9,8 @@ use crate::video::vpx::{SosCodec, SosVpxConfig, CodecPrefer};
 
 // ── 控制端编码能力 ──
 
-/// (vp8 可用, vp9 可用, h264 可用, 偏好)
-pub static PEER_ABILITY: Mutex<(i32, i32, i32, i32)> = Mutex::new((0, 0, 0, 0));
+/// (vp8 可用, vp9 可用, h264 可用, h265 可用, 偏好)
+pub static PEER_ABILITY: Mutex<(i32, i32, i32, i32, i32)> = Mutex::new((0, 0, 0, 0, 0));
 
 /// 标记硬件编码器不可用（会话级降级，直到进程重启）。
 ///
@@ -28,13 +28,30 @@ pub fn hw_available() -> bool {
     crate::video::hwenc::available()
 }
 
+/// 当前能否真正使用 H.265 硬件编码（独立于 H.264 的探测结论）。
+pub fn hw_available_h265() -> bool {
+    crate::video::hwenc::available_h265()
+}
+
 /// 记录控制端声明的解码能力与**编码偏好**。
 ///
 /// 编码格式真的发生变化时会请求重建编码器 —— `vpx_codec_ctx_t` 绑定具体 codec，
 /// 无法原地切换。这也是之前切 VP8 无效的另一个原因：就算选对了格式，
 /// 也不会重建，最后还是继续推 VP9 的码流。
-pub fn set_peer_codec_ability(vp8: bool, vp9: bool, h264: bool, prefer: CodecPrefer) {
-    let new_state = (vp8 as i32, vp9 as i32, h264 as i32, prefer.to_i32());
+pub fn set_peer_codec_ability(
+    vp8: bool,
+    vp9: bool,
+    h264: bool,
+    h265: bool,
+    prefer: CodecPrefer,
+) {
+    let new_state = (
+        vp8 as i32,
+        vp9 as i32,
+        h264 as i32,
+        h265 as i32,
+        prefer.to_i32(),
+    );
     let prev_prefer = {
         let guard = PEER_ABILITY.lock().unwrap();
         if *guard == new_state {
@@ -42,16 +59,17 @@ pub fn set_peer_codec_ability(vp8: bool, vp9: bool, h264: bool, prefer: CodecPre
             // 值没变时必须直接返回，否则每次都会重建一次编码器。
             return;
         }
-        CodecPrefer::from_i32(guard.3)
+        CodecPrefer::from_i32(guard.4)
     };
     let before = current_codec();
     *PEER_ABILITY.lock().unwrap() = new_state;
     let after = current_codec();
     log::info!(
-        "[VIDEO] peer codec: vp8={} vp9={} h264={} prefer={:?} -> encoder {:?}",
+        "[VIDEO] peer codec: vp8={} vp9={} h264={} h265={} prefer={:?} -> encoder {:?}",
         vp8,
         vp9,
         h264,
+        h265,
         prefer,
         after
     );
@@ -83,15 +101,15 @@ pub fn set_peer_codec_ability(vp8: bool, vp9: bool, h264: bool, prefer: CodecPre
     }
 }
 
-pub fn peer_ability() -> (bool, bool, bool, CodecPrefer) {
-    let (vp8, vp9, h264, prefer) = *PEER_ABILITY.lock().unwrap();
+pub fn peer_ability() -> (bool, bool, bool, bool, CodecPrefer) {
+    let (vp8, vp9, h264, h265, prefer) = *PEER_ABILITY.lock().unwrap();
     let prefer = CodecPrefer::from_i32(prefer);
-    if vp8 == 0 && vp9 == 0 && h264 == 0 {
+    if vp8 == 0 && vp9 == 0 && h264 == 0 && h265 == 0 {
         // 未声明时按 VP8/VP9 都支持处理（RustDesk 客户端两者都支持）；
-        // H.264 不在此列 —— 老客户端可能真的解不了，不能替它假设。
-        (true, true, false, prefer)
+        // H.264 / H.265 不在此列 —— 老客户端可能真的解不了，不能替它假设。
+        (true, true, false, false, prefer)
     } else {
-        (vp8 > 0, vp9 > 0, h264 > 0, prefer)
+        (vp8 > 0, vp9 > 0, h264 > 0, h265 > 0, prefer)
     }
 }
 /// 依据控制端能力/偏好与当前环境选择编码格式。
@@ -119,27 +137,69 @@ pub fn current_codec_for(slot: usize) -> SosCodec {
 }
 
 pub fn current_codec_for_impl(slot: Option<usize>) -> SosCodec {
-    let (peer_vp8, peer_vp9, peer_h264, prefer) = peer_ability();
-    // 硬件 H.264 的优先级最高：它对 CPU 几乎零成本，而这正是 SOS 最缺的资源。
-    //
-    // 条件缺一不可：对端能解（`ability_h264 > 0`）、本机有可用编码器、
-    // 用户没有显式要求别的格式。这里**不看** `ENC_LEVEL` —— 那套阶梯是按
-    // 「软件编码吃 CPU」标定的，对 GPU 编码没有意义（见 `video::hwenc` 的说明）。
-    if peer_h264 && hw_available() && matches!(prefer, CodecPrefer::Auto | CodecPrefer::H264) {
-        return SosCodec::H264;
-    }
-    // 用户点名要 H.264 但本机没有硬件编码器：退回软件规则，按 `Auto` 处理，
-    // 否则 `codec_with_degradation` 会把 H264 当成未知值。
-    let sw_prefer = if prefer == CodecPrefer::H264 {
-        CodecPrefer::Auto
-    } else {
-        prefer
-    };
+    let (peer_vp8, peer_vp9, peer_h264, peer_h265, prefer) = peer_ability();
     // 该屏的实测降级档位（仅在该屏真的在采集时有意义）
     let level = slot.map(enc_level).unwrap_or(0);
-    // 规则本身在 [`codec_with_degradation`] 里，那里有详细的优先级说明，
-    // 也有对应的回归测试（`tests/codec_prefer.rs`）。
-    crate::video::vpx::codec_with_degradation(peer_vp8, peer_vp9, sw_prefer, level)
+    pick_codec(
+        peer_vp8,
+        peer_vp9,
+        peer_h264,
+        peer_h265,
+        hw_available(),
+        hw_available_h265(),
+        prefer,
+        level,
+    )
+}
+
+/// 选码规则的**纯函数**版本（便于单测，不需要真实硬件）。
+///
+/// 优先级与上游 `scrap::codec::Encoder::update()` 一致（其源码注释原话是
+/// `auto: h265 > h264 > av1/vp9/vp8`）：
+///
+/// 1. 用户**显式**点名某种硬件格式，且对端能解、本机有编码器 → 用它；
+/// 2. `Auto`：**H.265 优先**（同硬件下比 H.264 省约 25-40% 带宽，编码成本相同），
+///    其次 H.264（CPU 成本近零），都没有才回软件 VP9/VP8；
+/// 3. 点名的硬件格式不可用（无编码器 / 对端解不了）→ 退回 `Auto` 的软件规则。
+///
+/// 注意硬件候选**不看** `level`：`ENC_LEVEL` 那套阶梯是按「软件编码吃 CPU」
+/// 标定的，对 GPU 编码没有意义（见 [`crate::video::hwenc`]）。
+#[allow(clippy::too_many_arguments)]
+pub fn pick_codec(
+    peer_vp8: bool,
+    peer_vp9: bool,
+    peer_h264: bool,
+    peer_h265: bool,
+    h264_hw: bool,
+    h265_hw: bool,
+    prefer: CodecPrefer,
+    level: u8,
+) -> SosCodec {
+    let h265_usable = peer_h265 && h265_hw;
+    let h264_usable = peer_h264 && h264_hw;
+    // 1. 点名的硬件格式确实可用 → 直接用（显式偏好压过 Auto 的顺序）。
+    match prefer {
+        CodecPrefer::H265 if h265_usable => return SosCodec::H265,
+        CodecPrefer::H264 if h264_usable => return SosCodec::H264,
+        _ => {}
+    }
+    // 2. 点名了软件格式：走软件规则，**不受**硬件可用性影响。
+    //    （控制端显式选 VP8/VP9 时，不能被本机刚好有硬件编码器就抢走。）
+    if matches!(prefer, CodecPrefer::Vp8 | CodecPrefer::Vp9) {
+        return crate::video::vpx::codec_with_degradation(peer_vp8, peer_vp9, prefer, level);
+    }
+    // 3. `Auto`，或者点名的硬件格式不可用 → 硬件链（上游 `auto: h265 > h264`），
+    //    再不行才回软件 `Auto`。
+    //
+    //    注意这里是「回退到自动」而不是「直接掉软件」：与上游一致 —— 它同样用
+    //    `auto_codec` 兜底（`PreferCodec::H264/H265` 分支的 else 都是 `auto_codec`）。
+    if h265_usable {
+        return SosCodec::H265;
+    }
+    if h264_usable {
+        return SosCodec::H264;
+    }
+    crate::video::vpx::codec_with_degradation(peer_vp8, peer_vp9, CodecPrefer::Auto, level)
 }
 
 /// 供诊断日志使用：当前链路的编码格式与线程数
@@ -157,5 +217,6 @@ pub fn codec_name() -> &'static str {
         SosCodec::Vp8 => "VP8",
         SosCodec::Vp9 => "VP9",
         SosCodec::H264 => "H264(hw)",
+        SosCodec::H265 => "H265(hw)",
     }
 }
